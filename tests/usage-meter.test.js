@@ -217,3 +217,16 @@ test("content no longer wires local fake chat or token counters into the meter",
   assert.match(source, /tokensToday:\s*null/);
   assert.match(source, /tokens today --/);
 });
+
+test("content script avoids hot observers and push-style storage updates", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+
+  assert.doesNotMatch(source, /MutationObserver/);
+  assert.doesNotMatch(source, /PerformanceObserver/);
+  assert.doesNotMatch(source, /storage\.onChanged/);
+  assert.doesNotMatch(source, /runtime\.onMessage/);
+  assert.doesNotMatch(source, /setInterval/);
+  assert.doesNotMatch(source, /XMLHttpRequest/);
+  assert.match(source, /STORAGE_PULL_MS\s*=\s*90000/);
+  assert.match(source, /DOM_POLL_MS\s*=\s*3000/);
+});

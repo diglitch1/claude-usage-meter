@@ -308,17 +308,21 @@
   async function loadState() {
     const result = await storageGet([STORAGE_KEY]);
     const stored = result && result[STORAGE_KEY];
-    const base = createDefaultState();
-    const state = Object.assign(base, stored || {});
-    state.usage = Object.assign(base.usage, (stored && stored.usage) || {});
+    const state = createDefaultState();
+
+    if (stored && typeof stored.day === "string") {
+      state.day = stored.day;
+    }
+    if (stored && stored.organizationId) {
+      state.organizationId = stored.organizationId;
+    }
+    if (stored && stored.usageFetch && typeof stored.usageFetch === "object") {
+      state.usageFetch = stored.usageFetch;
+    }
+    state.usage = Object.assign({}, state.usage, (stored && stored.usage) || {});
     state.usageByOrg = stored && stored.usageByOrg && typeof stored.usageByOrg === "object"
       ? stored.usageByOrg
       : {};
-    state.chats = stored && stored.chats && typeof stored.chats === "object" ? stored.chats : {};
-    state.recentSends = Array.isArray(stored && stored.recentSends) ? stored.recentSends : [];
-    state.todayMessages = Number(stored && stored.todayMessages) || 0;
-    state.todayTokens = Number(stored && stored.todayTokens) || 0;
-    state.tokensExact = Boolean(stored && stored.tokensExact);
     return state;
   }
 
@@ -334,11 +338,7 @@
         updatedAt: 0
       },
       usageByOrg: {},
-      chats: {},
-      todayMessages: 0,
-      todayTokens: 0,
-      tokensExact: false,
-      recentSends: []
+      usageFetch: null
     };
   }
 
@@ -476,10 +476,6 @@
     }
 
     state.day = day;
-    state.todayMessages = 0;
-    state.todayTokens = 0;
-    state.tokensExact = false;
-    state.recentSends = [];
   }
 
   function normalizeResetText(text) {

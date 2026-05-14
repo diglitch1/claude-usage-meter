@@ -8,10 +8,10 @@
 
   const RENDER_NEUTRAL_PLACEHOLDERS = true;
   const UPDATE_DEBOUNCE_MS = 350;
-  const ROUTE_POLL_MS = 2500;
-  const COMPOSER_CACHE_MS = 8000;
-  const ORG_SCAN_INTERVAL_MS = 5000;
+  const DOM_POLL_MS = 3000;
+  const ORG_SCAN_INTERVAL_MS = 3000;
   const BACKGROUND_REFRESH_MIN_MS = 30000;
+  const STORAGE_PULL_MS = 90000;
   const USAGE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
   const ICONS = {
@@ -58,25 +58,23 @@
   let state = createDefaultState();
   let bar = null;
   let cachedComposer = null;
-  let nextComposerScanAt = 0;
   let lastPath = window.location.pathname;
   let lastRenderedHtml = "";
   let saveTimer = 0;
   let updateTimer = 0;
+  let domPollTimer = 0;
+  let storagePullTimer = 0;
   let nextOrgScanAt = 0;
   let lastBackgroundRefreshRequestAt = 0;
-  let observer = null;
-  let resourceObserver = null;
 
   init();
 
   async function init() {
     state = await loadState();
-    installStorageChangeListener();
-    installResourceObserver();
+    installStoragePolling();
     detectAndPersistOrgId(true);
     requestBackgroundUsageRefresh("content-open", true);
-    installMutationObserver();
+    installDomPoller();
     installRouteAndViewportListeners();
     await update({ forceComposerScan: true });
   }
@@ -93,11 +91,7 @@
         updatedAt: 0
       },
       usageByOrg: {},
-      chats: {},
-      todayMessages: 0,
-      todayTokens: 0,
-      tokensExact: false,
-      recentSends: []
+      usageFetch: null
     };
   }
 
@@ -121,8 +115,18 @@
 
   function migrateState(input) {
     const base = createDefaultState();
-    const output = Object.assign(base, input || {});
+    const output = base;
     const legacyUsage = (input && input.usage) || {};
+
+    if (input && typeof input.day === "string") {
+      output.day = input.day;
+    }
+    if (input && input.organizationId) {
+      output.organizationId = input.organizationId;
+    }
+    if (input && input.usageFetch && typeof input.usageFetch === "object") {
+      output.usageFetch = input.usageFetch;
+    }
 
     output.usage = Object.assign(base.usage, legacyUsage, {
       usagePercent: coercePercent(legacyUsage.usagePercent ?? legacyUsage.sessionPercent),
@@ -133,16 +137,6 @@
     output.usageByOrg = input && input.usageByOrg && typeof input.usageByOrg === "object"
       ? input.usageByOrg
       : {};
-    output.chats = input && input.chats && typeof input.chats === "object" ? input.chats : {};
-    Object.keys(output.chats).forEach((key) => {
-      if (!key.startsWith("chat:")) {
-        delete output.chats[key];
-      }
-    });
-    output.recentSends = Array.isArray(input && input.recentSends) ? input.recentSends : [];
-    output.todayMessages = Number(input && input.todayMessages) || 0;
-    output.todayTokens = Number(input && input.todayTokens) || 0;
-    output.tokensExact = Boolean(input && (input.tokensExact || input.tokenSource === "exact"));
 
     return output;
   }
@@ -159,31 +153,37 @@
     }, 250);
   }
 
-  function installStorageChangeListener() {
-    const storageApi =
-      typeof browser !== "undefined" && browser.storage && browser.storage.onChanged
-        ? browser.storage
-        : typeof chrome !== "undefined" && chrome.storage && chrome.storage.onChanged
-          ? chrome.storage
-          : null;
+  function installStoragePolling() {
+    scheduleStoragePull();
+  }
 
-    if (!storageApi) {
+  function scheduleStoragePull() {
+    window.clearTimeout(storagePullTimer);
+    storagePullTimer = window.setTimeout(async () => {
+      await pullStoredState();
+      scheduleStoragePull();
+    }, STORAGE_PULL_MS);
+  }
+
+  async function pullStoredState() {
+    let stored = null;
+    try {
+      const result = await extensionStorage.get([STORAGE_KEY]);
+      stored = result && result[STORAGE_KEY];
+    } catch (_error) {
+      stored = null;
+    }
+
+    if (!stored) {
       return;
     }
 
-    storageApi.onChanged.addListener((changes, areaName) => {
-      if (areaName && areaName !== "local") {
-        return;
-      }
-
-      const change = changes && changes[STORAGE_KEY];
-      if (!change || !change.newValue) {
-        return;
-      }
-
-      mergeStoredUsageState(change.newValue);
+    const beforeVersion = getUsageVersion(state);
+    const beforeOrgId = state.organizationId || "";
+    mergeStoredUsageState(stored);
+    if (beforeVersion !== getUsageVersion(state) || beforeOrgId !== (state.organizationId || "")) {
       scheduleUpdate({});
-    });
+    }
   }
 
   function mergeStoredUsageState(stored) {
@@ -203,11 +203,6 @@
 
     if (incoming.organizationId && !state.organizationId) {
       state.organizationId = incoming.organizationId;
-    }
-    if (incoming.day === state.day) {
-      state.todayMessages = Math.max(state.todayMessages, incoming.todayMessages || 0);
-      state.todayTokens = Math.max(state.todayTokens, incoming.todayTokens || 0);
-      state.tokensExact = Boolean(state.tokensExact || incoming.tokensExact);
     }
   }
 
@@ -239,11 +234,6 @@
     }
     if (incoming.organizationId && !state.organizationId) {
       state.organizationId = incoming.organizationId;
-    }
-    if (incoming.day === state.day) {
-      state.todayMessages = Math.max(state.todayMessages, incoming.todayMessages || 0);
-      state.todayTokens = Math.max(state.todayTokens, incoming.todayTokens || 0);
-      state.tokensExact = Boolean(state.tokensExact || incoming.tokensExact);
     }
   }
 
@@ -326,27 +316,6 @@
     return Promise.resolve(null);
   }
 
-  function installResourceObserver() {
-    if (typeof PerformanceObserver === "undefined") {
-      return;
-    }
-
-    try {
-      resourceObserver = new PerformanceObserver((list) => {
-        const entries = list.getEntries ? list.getEntries() : [];
-        entries.forEach((entry) => {
-          const orgId = findOrgIdInText(entry && entry.name);
-          if (orgId && applyDetectedOrgId(orgId)) {
-            requestBackgroundUsageRefresh("org-resource", true, orgId);
-          }
-        });
-      });
-      resourceObserver.observe({ type: "resource", buffered: true });
-    } catch (_error) {
-      resourceObserver = null;
-    }
-  }
-
   function detectAndPersistOrgId(force = false) {
     const now = Date.now();
     if (!force && now < nextOrgScanAt) {
@@ -354,7 +323,7 @@
     }
 
     nextOrgScanAt = now + ORG_SCAN_INTERVAL_MS;
-    const orgId = detectOrganizationId() || state.organizationId || null;
+    const orgId = detectOrganizationId(force) || state.organizationId || null;
     applyDetectedOrgId(orgId);
 
     return orgId;
@@ -425,7 +394,7 @@
     };
   }
 
-  function detectOrganizationId() {
+  function detectOrganizationId(deep = false) {
     const fromLocation = findOrgIdInText(window.location.href);
     if (fromLocation) {
       return fromLocation;
@@ -434,6 +403,10 @@
     const fromPerformance = findOrgIdInPerformance();
     if (fromPerformance) {
       return fromPerformance;
+    }
+
+    if (!deep) {
+      return "";
     }
 
     const sessionStorageRef = getWebStorage("sessionStorage");
@@ -468,12 +441,11 @@
     }
 
     try {
-      const entries = performance
-        .getEntriesByType("resource")
-        .slice()
-        .sort((a, b) => (b.startTime || 0) - (a.startTime || 0));
+      const entries = performance.getEntriesByType("resource");
+      const firstIndex = Math.max(0, entries.length - 80);
 
-      for (const entry of entries) {
+      for (let index = entries.length - 1; index >= firstIndex; index -= 1) {
+        const entry = entries[index];
         const orgId = findOrgIdInText(entry && entry.name);
         if (orgId) {
           return orgId;
@@ -594,56 +566,43 @@
     return match ? match[0] : "";
   }
 
-  function installMutationObserver() {
-    const target = document.body || document.documentElement;
-    if (!target) {
-      return;
-    }
-
-    observer = new MutationObserver((mutations) => {
-      if (bar && mutations.every((mutation) => bar.contains(mutation.target))) {
-        return;
-      }
-      scheduleUpdate({
-        forceComposerScan: !isUsableComposer(cachedComposer)
-      });
-    });
-
-    observer.observe(target, {
-      childList: true,
-      subtree: true
-    });
-  }
-
-  function installRouteAndViewportListeners() {
-    window.setInterval(() => {
+  function installDomPoller() {
+    window.clearTimeout(domPollTimer);
+    domPollTimer = window.setTimeout(() => {
       const previousOrgId = state.organizationId || "";
       if (lastPath !== window.location.pathname) {
         lastPath = window.location.pathname;
         cachedComposer = null;
-        nextComposerScanAt = 0;
         detectAndPersistOrgId(true);
       }
+
       const orgId = detectAndPersistOrgId();
       if (orgId && orgId !== previousOrgId) {
         requestBackgroundUsageRefresh("org-detected", true, orgId);
       }
-      scheduleUpdate({});
-    }, ROUTE_POLL_MS);
 
+      if (!bar || !bar.isConnected || !cachedComposer || !cachedComposer.isConnected) {
+        scheduleUpdate({ forceComposerScan: true });
+      }
+
+      installDomPoller();
+    }, DOM_POLL_MS);
+  }
+
+  function installRouteAndViewportListeners() {
     window.addEventListener("resize", () => scheduleUpdate({ forceComposerScan: true }), {
       passive: true
     });
     window.addEventListener("focus", () => {
       scheduleUpdate({ forceComposerScan: true });
-      requestBackgroundUsageRefresh("content-focus");
+      detectAndPersistOrgId(true);
     }, {
       passive: true
     });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) {
         scheduleUpdate({ forceComposerScan: true });
-        requestBackgroundUsageRefresh("content-visible");
+        detectAndPersistOrgId(true);
       }
     });
   }
@@ -670,7 +629,7 @@
       return;
     }
 
-    injectBarAfterComposer(composer);
+    injectBarAfterComposer(composer, Boolean(options.forceComposerScan));
     renderBar(usageState);
   }
 
@@ -836,20 +795,26 @@
     }
   }
 
-  function injectBarAfterComposer(composer) {
+  function injectBarAfterComposer(composer, syncLayout = false) {
+    let didInsert = false;
+
     if (!bar) {
       bar = document.createElement("button");
       bar.id = ROOT_ID;
       bar.type = "button";
       bar.className = "claude-usage-meter";
       bar.addEventListener("click", () => window.location.assign(SETTINGS_URL));
+      didInsert = true;
     }
 
     if (composer.nextSibling !== bar) {
       composer.parentNode.insertBefore(bar, composer.nextSibling);
+      didInsert = true;
     }
 
-    syncBarLayoutWithComposer(composer);
+    if (syncLayout || didInsert) {
+      syncBarLayoutWithComposer(composer);
+    }
   }
 
   function syncBarLayoutWithComposer(composer) {
@@ -870,8 +835,7 @@
   }
 
   function findComposerContainer(force = false) {
-    const now = Date.now();
-    if (!force && isUsableComposer(cachedComposer) && now < nextComposerScanAt) {
+    if (!force && cachedComposer && cachedComposer.isConnected) {
       return cachedComposer;
     }
 
@@ -886,13 +850,11 @@
       const composer = findComposerAncestor(candidate);
       if (composer) {
         cachedComposer = composer;
-        nextComposerScanAt = Date.now() + COMPOSER_CACHE_MS;
         return composer;
       }
     }
 
     cachedComposer = null;
-    nextComposerScanAt = Date.now() + 1000;
     return null;
   }
 
@@ -931,10 +893,6 @@
     );
   }
 
-  function isUsableComposer(node) {
-    return Boolean(node && node.isConnected && isComposerLikeBox(node, node.getBoundingClientRect()));
-  }
-
   function isUsageSettingsPage() {
     return /\/settings\/usage\/?$/i.test(window.location.pathname);
   }
@@ -945,10 +903,6 @@
     }
 
     targetState.day = getDayKey();
-    targetState.todayMessages = 0;
-    targetState.todayTokens = 0;
-    targetState.tokensExact = false;
-    targetState.recentSends = [];
     if (shouldSave) {
       scheduleSave();
     }
