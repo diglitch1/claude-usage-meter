@@ -1,13 +1,23 @@
 (function () {
   const ROOT_ID = "claude-usage-meter-root";
-  const STORAGE_KEY = "claudeUsageMeterStateV1";
+  const STORAGE_KEY = "claudeUsageMeterStateV2";
+  const LEGACY_STORAGE_KEY = "claudeUsageMeterStateV1";
   const SETTINGS_URL = "https://claude.ai/settings/usage";
-  const UPDATE_INTERVAL_MS = 3000;
-  const UPDATE_DEBOUNCE_MS = 250;
-  const COMPOSER_RESCAN_MS = 8000;
-  const CHAT_SCAN_INTERVAL_MS = 60000;
-  const USAGE_SCRAPE_INTERVAL_MS = 5000;
+
+  const RENDER_NEUTRAL_PLACEHOLDERS = true;
+  const UPDATE_DEBOUNCE_MS = 350;
+  const ROUTE_POLL_MS = 2500;
+  const COMPOSER_CACHE_MS = 8000;
+  const CHAT_SCAN_MS = 10000;
+  const USAGE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
   const RECENT_SEND_WINDOW_MS = 9000;
+
+  const ICONS = {
+    message:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/><path d="M8 9h8M8 13h5"/></svg>',
+    external:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>'
+  };
 
   const fallbackStorage = {
     async get(key) {
@@ -24,7 +34,7 @@
           window.localStorage.setItem(key, JSON.stringify(item));
         });
       } catch (_error) {
-        // Storage is best-effort only.
+        // Local persistence is best-effort.
       }
     }
   };
@@ -43,78 +53,87 @@
           }
         : fallbackStorage;
 
-  let root = null;
-  let state = getDefaultState();
-  let lastPath = window.location.pathname;
-  let lastChatKey = getChatKey();
-  let saveTimer = 0;
-  let updateTimer = 0;
-  let placeRaf = 0;
+  let state = createDefaultState();
+  let bar = null;
   let cachedComposer = null;
   let nextComposerScanAt = 0;
   let lastChatScanAt = 0;
-  let lastUsageScrapeAt = 0;
+  let lastPath = window.location.pathname;
   let lastRenderedHtml = "";
+  let saveTimer = 0;
+  let updateTimer = 0;
+  let observer = null;
 
   init();
 
   async function init() {
-    state = normalizeState(await loadState());
-    installInputListeners();
-    installObservers();
-    syncFromLocation();
-    scheduleUpdate({ forceComposerScan: true, scanChat: true }, 0);
-    window.setInterval(() => {
-      checkRoute();
-      scheduleUpdate({}, 0);
-    }, UPDATE_INTERVAL_MS);
+    state = await loadState();
+    installSendListeners();
+    installMutationObserver();
+    installRouteAndViewportListeners();
+    await update({ forceComposerScan: true, scanChat: true });
   }
 
-  function getDefaultState() {
+  function createDefaultState() {
     return {
       day: getDayKey(),
+      usage: {
+        windowLabel: "5h",
+        plan: "",
+        usagePercent: null,
+        resetText: "",
+        resetAt: null,
+        updatedAt: 0
+      },
+      chats: {},
       todayMessages: 0,
       todayTokens: 0,
-      tokenSource: "estimated",
-      chats: {},
-      usage: {
-        plan: "",
-        sessionPercent: null,
-        sessionReset: "",
-        weeklyPercent: null,
-        weeklyReset: "",
-        updatedAt: 0,
-        source: ""
-      },
+      tokensExact: false,
       recentSends: []
     };
   }
 
   async function loadState() {
+    const base = createDefaultState();
+    let stored = null;
+    let legacy = null;
+
     try {
-      const result = await extensionStorage.get(STORAGE_KEY);
-      return result && result[STORAGE_KEY] ? result[STORAGE_KEY] : getDefaultState();
+      const result = await extensionStorage.get([STORAGE_KEY, LEGACY_STORAGE_KEY]);
+      stored = result && result[STORAGE_KEY];
+      legacy = result && result[LEGACY_STORAGE_KEY];
     } catch (_error) {
-      return getDefaultState();
+      stored = null;
     }
+
+    const merged = migrateState(Object.assign(base, legacy || {}, stored || {}));
+    rollDayIfNeeded(merged, false);
+    return merged;
   }
 
-  function normalizeState(input) {
-    const base = getDefaultState();
-    const next = Object.assign(base, input || {});
-    next.usage = Object.assign(base.usage, input && input.usage ? input.usage : {});
-    next.chats = input && input.chats && typeof input.chats === "object" ? input.chats : {};
-    next.recentSends = Array.isArray(input && input.recentSends) ? input.recentSends : [];
+  function migrateState(input) {
+    const base = createDefaultState();
+    const output = Object.assign(base, input || {});
+    const legacyUsage = (input && input.usage) || {};
 
-    if (next.day !== getDayKey()) {
-      next.day = getDayKey();
-      next.todayMessages = 0;
-      next.todayTokens = 0;
-      next.tokenSource = "estimated";
-      next.recentSends = [];
-    }
+    output.usage = Object.assign(base.usage, legacyUsage, {
+      usagePercent: coercePercent(legacyUsage.usagePercent ?? legacyUsage.sessionPercent),
+      resetText: legacyUsage.resetText || legacyUsage.sessionReset || "",
+      plan: legacyUsage.plan || "",
+      resetAt: Number.isFinite(legacyUsage.resetAt) ? legacyUsage.resetAt : null
+    });
+    output.chats = input && input.chats && typeof input.chats === "object" ? input.chats : {};
+    Object.keys(output.chats).forEach((key) => {
+      if (!key.startsWith("chat:")) {
+        delete output.chats[key];
+      }
+    });
+    output.recentSends = Array.isArray(input && input.recentSends) ? input.recentSends : [];
+    output.todayMessages = Number(input && input.todayMessages) || 0;
+    output.todayTokens = Number(input && input.todayTokens) || 0;
+    output.tokensExact = Boolean(input && (input.tokensExact || input.tokenSource === "exact"));
 
-    return next;
+    return output;
   }
 
   function scheduleSave() {
@@ -123,324 +142,355 @@
       try {
         await extensionStorage.set({ [STORAGE_KEY]: state });
       } catch (_error) {
-        // Persistence failure should not break Claude.
+        // Do not let storage failures affect Claude.
       }
     }, 250);
   }
 
-  function installInputListeners() {
-    document.addEventListener(
-      "keydown",
-      (event) => {
-        if (
-          event.key !== "Enter" ||
-          event.shiftKey ||
-          event.altKey ||
-          event.ctrlKey ||
-          event.isComposing
-        ) {
-          return;
-        }
-        if (!isComposerInput(event.target)) {
-          return;
-        }
-        capturePotentialSend(event.target, "keyboard");
-      },
-      true
-    );
-
-    document.addEventListener(
-      "click",
-      (event) => {
-        const button = event.target && event.target.closest
-          ? event.target.closest("button,[role='button']")
-          : null;
-        if (!button || button.closest(`#${ROOT_ID}`)) {
-          return;
-        }
-        if (!looksLikeSendButton(button)) {
-          return;
-        }
-        capturePotentialSend(button, "button");
-      },
-      true
-    );
-
-    document.addEventListener(
-      "submit",
-      (event) => {
-        if (!event.target || !event.target.querySelector) {
-          return;
-        }
-        const input = event.target.querySelector("textarea,[contenteditable='true']");
-        if (input && isComposerInput(input)) {
-          capturePotentialSend(input, "submit");
-        }
-      },
-      true
-    );
-
-    document.addEventListener(
-      "focusin",
-      (event) => {
-        if (event.target && event.target.closest) {
-          const editable = event.target.closest("textarea,[contenteditable='true']");
-          if (editable) {
-            cacheComposerFromNode(editable);
-            scheduleUpdate({}, UPDATE_DEBOUNCE_MS);
-          }
-        }
-      },
-      true
-    );
+  function installSendListeners() {
+    document.addEventListener("keydown", handleComposerEnter, true);
+    document.addEventListener("click", handlePossibleSendClick, true);
+    document.addEventListener("submit", handlePossibleFormSubmit, true);
   }
 
-  function installObservers() {
-    window.addEventListener("resize", schedulePlace, { passive: true });
-    window.addEventListener("scroll", schedulePlace, { passive: true });
-    window.addEventListener("focus", () => scheduleUpdate({ forceComposerScan: true }, 0));
-    window.addEventListener("popstate", () => {
-      checkRoute();
-      scheduleUpdate({ forceComposerScan: true, scanChat: true }, 0);
+  function handleComposerEnter(event) {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.isComposing
+    ) {
+      return;
+    }
+
+    if (isComposerInput(event.target)) {
+      capturePotentialSend(event.target);
+    }
+  }
+
+  function handlePossibleSendClick(event) {
+    const button = event.target && event.target.closest
+      ? event.target.closest("button,[role='button']")
+      : null;
+    if (!button || button.closest(`#${ROOT_ID}`) || !looksLikeSendButton(button)) {
+      return;
+    }
+
+    capturePotentialSend(button);
+  }
+
+  function handlePossibleFormSubmit(event) {
+    if (!event.target || !event.target.querySelector) {
+      return;
+    }
+
+    const input = event.target.querySelector("textarea,[contenteditable='true']");
+    if (input && isComposerInput(input)) {
+      capturePotentialSend(input);
+    }
+  }
+
+  function installMutationObserver() {
+    const target = document.body || document.documentElement;
+    if (!target) {
+      return;
+    }
+
+    observer = new MutationObserver((mutations) => {
+      if (bar && mutations.every((mutation) => bar.contains(mutation.target))) {
+        return;
+      }
+      scheduleUpdate({
+        forceComposerScan: !isUsableComposer(cachedComposer),
+        scanChat: Date.now() - lastChatScanAt > CHAT_SCAN_MS
+      });
+    });
+
+    observer.observe(target, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  function installRouteAndViewportListeners() {
+    window.setInterval(() => {
+      if (lastPath !== window.location.pathname) {
+        lastPath = window.location.pathname;
+        cachedComposer = null;
+        nextComposerScanAt = 0;
+        lastChatScanAt = 0;
+      }
+      scheduleUpdate({});
+    }, ROUTE_POLL_MS);
+
+    window.addEventListener("resize", () => scheduleUpdate({ forceComposerScan: true }), {
+      passive: true
+    });
+    window.addEventListener("focus", () => scheduleUpdate({ forceComposerScan: true }), {
+      passive: true
     });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) {
-        checkRoute();
-        scheduleUpdate({ forceComposerScan: true }, 0);
+        scheduleUpdate({ forceComposerScan: true });
       }
     });
   }
 
-  function checkRoute() {
-    if (lastPath === window.location.pathname) {
-      return false;
-    }
-
-    lastPath = window.location.pathname;
-    cachedComposer = null;
-    nextComposerScanAt = 0;
-    lastChatScanAt = 0;
-    syncFromLocation();
-    return true;
-  }
-
-  function scheduleUpdate(options = {}, delay = UPDATE_DEBOUNCE_MS) {
+  function scheduleUpdate(options = {}) {
     window.clearTimeout(updateTimer);
-    updateTimer = window.setTimeout(() => update(options), delay);
+    updateTimer = window.setTimeout(() => update(options), UPDATE_DEBOUNCE_MS);
   }
 
-  function schedulePlace() {
-    if (placeRaf) {
+  async function update(options = {}) {
+    rollDayIfNeeded(state);
+    await refreshUsageCacheFromPage();
+
+    const composer = findComposerContainer(Boolean(options.forceComposerScan));
+
+    if (!composer || isUsageSettingsPage()) {
+      removeBar();
       return;
     }
 
-    placeRaf = window.requestAnimationFrame(() => {
-      placeRaf = 0;
-      placeRoot(cachedComposer);
-    });
-  }
-
-  function syncFromLocation() {
-    const chatKey = getChatKey();
-    if (chatKey !== lastChatKey) {
-      carryNewChatCount(lastChatKey, chatKey);
-      lastChatKey = chatKey;
+    if (options.scanChat || Date.now() - lastChatScanAt > CHAT_SCAN_MS) {
+      updateChatCountFromVisibleMessages();
     }
-    ensureChat(chatKey);
-    if (isUsageSettingsPage()) {
-      scrapeUsagePage(true);
-      window.setTimeout(() => scrapeUsagePage(true), 800);
-      window.setTimeout(() => scrapeUsagePage(true), 2200);
-    }
-  }
 
-  function carryNewChatCount(previousKey, nextKey) {
-    const previous = state.chats[previousKey];
-    if (!previous) {
+    const usageState = buildUsageState();
+    if (!usageState) {
+      removeBar();
       return;
     }
 
-    const next = ensureChat(nextKey);
-    const isFreshNewChat =
-      /^path:\/?(new)?$/i.test(previousKey) && Date.now() - previous.updatedAt < 30000;
+    injectBarAfterComposer(composer);
+    renderBar(usageState);
+  }
 
-    if (isFreshNewChat && next.count === 0 && previous.count > 0) {
-      next.count = previous.count;
-      next.updatedAt = Date.now();
+  function buildUsageState() {
+    const usageData = getClaudeUsageData();
+    if (!usageData && !RENDER_NEUTRAL_PLACEHOLDERS) {
+      return null;
+    }
+
+    const chat = ensureChat(getChatKey());
+    return {
+      windowLabel: usageData ? usageData.windowLabel : "5h",
+      plan: usageData ? usageData.plan : "Pro",
+      usagePercent: usageData ? usageData.usagePercent : null,
+      resetText: usageData ? usageData.resetText : "open usage to sync",
+      chatMessages: isRealChatRoute() ? chat.count : 0,
+      todayMessages: state.todayMessages,
+      tokensToday: state.todayTokens,
+      tokensApproximate: !state.tokensExact
+    };
+  }
+
+  function getClaudeUsageData() {
+    // TODO: replace this adapter if Claude exposes a stable first-party usage API.
+    const usage = state.usage;
+    if (!Number.isFinite(usage.usagePercent) || !usage.plan) {
+      return null;
+    }
+
+    const resetText = getCurrentResetText(usage);
+    const hasFreshReset = Number.isFinite(usage.resetAt)
+      ? usage.resetAt > Date.now() - 60 * 1000
+      : Date.now() - usage.updatedAt < USAGE_CACHE_MAX_AGE_MS;
+
+    if (!hasFreshReset) {
+      return null;
+    }
+
+    return {
+      windowLabel: usage.windowLabel || "5h",
+      plan: usage.plan,
+      usagePercent: usage.usagePercent,
+      resetText,
+      source: "settings-cache"
+    };
+  }
+
+  async function refreshUsageCacheFromPage() {
+    if (!isUsageSettingsPage() || !document.body) {
+      return;
+    }
+
+    const extracted = extractUsageFromSettingsPage();
+    if (!extracted) {
+      return;
+    }
+
+    const resetDelta = Math.abs((extracted.resetAt || 0) - (state.usage.resetAt || 0));
+    const usageChanged =
+      extracted.windowLabel !== state.usage.windowLabel ||
+      extracted.plan !== state.usage.plan ||
+      extracted.usagePercent !== state.usage.usagePercent ||
+      extracted.resetText !== state.usage.resetText ||
+      resetDelta > 60000;
+
+    if (usageChanged) {
+      state.usage = Object.assign({}, state.usage, extracted, {
+        updatedAt: Date.now()
+      });
       scheduleSave();
     }
   }
 
-  function update(options = {}) {
-    rollDayIfNeeded();
-    if (isUsageSettingsPage()) {
-      scrapeUsagePage();
+  function extractUsageFromSettingsPage() {
+    const text = normalizeLines(document.body.innerText || "");
+    if (!/usage|current session|5-hour|5 hour|resets/i.test(text)) {
+      return null;
     }
 
-    const composer = findComposer(Boolean(options.forceComposerScan));
-    const shouldShow = Boolean(composer) && !isUsageSettingsPage();
-    if (!shouldShow) {
-      if (root) {
-        root.hidden = true;
-      }
+    const currentBlock =
+      blockBetween(text, /Current session/i, /Weekly|Today|Updated|Settings|Quit/i) ||
+      blockBetween(text, /5[-\s]?Hour Window/i, /Weekly|Today|Updated|Settings|Quit/i) ||
+      text;
+
+    const usagePercent = pickPercent(currentBlock);
+    if (!Number.isFinite(usagePercent)) {
+      return null;
+    }
+
+    const rawReset = pickResetText(currentBlock);
+    const todayBlock = blockBetween(text, /Today/i, /Updated|Settings|Quit/i) || "";
+    const plan = pickPlan(text);
+    const messages = pickMetric(todayBlock, /Messages/i);
+    const tokens = pickMetric(todayBlock, /Tokens/i);
+    let metricsChanged = false;
+
+    if (Number.isFinite(messages) && messages > state.todayMessages) {
+      state.todayMessages = messages;
+      metricsChanged = true;
+    }
+    if (Number.isFinite(tokens) && tokens > state.todayTokens) {
+      state.todayTokens = tokens;
+      state.tokensExact = true;
+      metricsChanged = true;
+    }
+    if (metricsChanged) {
+      scheduleSave();
+    }
+
+    return {
+      windowLabel: "5h",
+      plan,
+      usagePercent,
+      resetText: normalizeResetText(rawReset),
+      resetAt: parseResetAt(rawReset)
+    };
+  }
+
+  function getUsageTone(percent) {
+    if (!Number.isFinite(percent)) {
+      return "neutral";
+    }
+    if (percent < 50) {
+      return "low";
+    }
+    if (percent < 85) {
+      return "medium";
+    }
+    return "high";
+  }
+
+  function renderBar(usageState) {
+    if (!bar) {
       return;
     }
 
-    root = root || createRoot();
-    root.hidden = false;
-    placeRoot(composer);
-    if (options.scanChat || Date.now() - lastChatScanAt > CHAT_SCAN_INTERVAL_MS) {
-      updateChatCount();
-    }
-    render();
-  }
+    const percent = coercePercent(usageState.usagePercent);
+    const tone = getUsageTone(percent);
+    const percentText = Number.isFinite(percent) ? `${percent}%` : "--";
+    const progress = Number.isFinite(percent) ? `${percent}%` : "0%";
+    const messageText = `${formatCount(usageState.chatMessages)} • ${formatCount(usageState.todayMessages)}`;
+    const tokenText = formatTokenLabel(usageState.tokensToday, usageState.tokensApproximate);
 
-  function rollDayIfNeeded() {
-    if (state.day === getDayKey()) {
-      return;
-    }
+    bar.dataset.usageTone = tone;
+    bar.style.setProperty("--cum-progress", progress);
+    bar.setAttribute("aria-label", "Open Claude usage settings");
 
-    state.day = getDayKey();
-    state.todayMessages = 0;
-    state.todayTokens = 0;
-    state.tokenSource = "estimated";
-    state.recentSends = [];
-    scheduleSave();
-  }
-
-  function createRoot() {
-    const element = document.createElement("button");
-    element.id = ROOT_ID;
-    element.type = "button";
-    element.className = "claude-usage-meter";
-    element.setAttribute("aria-label", "Open Claude usage settings");
-    element.addEventListener("click", () => {
-      window.location.assign(SETTINGS_URL);
-    });
-    (document.body || document.documentElement).appendChild(element);
-    lastRenderedHtml = "";
-    return element;
-  }
-
-  function render() {
-    if (!root) {
-      return;
-    }
-
-    const chat = ensureChat(getChatKey());
-    const sessionPercent = clampPercent(state.usage.sessionPercent);
-    const sessionLabel = sessionPercent == null ? "--" : `${sessionPercent}%`;
-    const progressWidth = sessionPercent == null ? 0 : sessionPercent;
-    const resetLabel = compactReset(state.usage.sessionReset);
-    const resetText = resetLabel ? `reset ${resetLabel}` : "open usage to sync";
-    const planLabel = state.usage.plan ? escapeHtml(state.usage.plan) : "Claude";
-    const messagesLabel = `${formatInt(chat.count)}:${formatInt(state.todayMessages)}`;
-    const tokensLabel = formatTokenCount(state.todayTokens);
-    const tokenPrefix = state.tokenSource === "exact" ? "" : "~";
-    const updatedLabel = state.usage.updatedAt
-      ? `updated ${formatAge(Date.now() - state.usage.updatedAt)} ago`
-      : "not synced yet";
-
-    root.title = updatedLabel;
     const html = `
-      <span class="cum-main">
-        <span class="cum-title">
-          <span class="cum-mark" aria-hidden="true"></span>
-          <span class="cum-name">5h Usage</span>
-          <span class="cum-plan">${planLabel}</span>
-        </span>
-        <span class="cum-session">
-          <span class="cum-session-number">${sessionLabel}</span>
-          <span class="cum-progress" aria-hidden="true">
-            <span class="cum-progress-fill" style="width: ${progressWidth}%"></span>
-          </span>
-          <span class="cum-reset">${escapeHtml(resetText)}</span>
-        </span>
-        <span class="cum-stat">
-          <span class="cum-stat-label">chat:today</span>
-          <span class="cum-stat-value">${messagesLabel}</span>
-        </span>
-        <span class="cum-stat">
-          <span class="cum-stat-label">tokens today</span>
-          <span class="cum-stat-value">${tokenPrefix}${tokensLabel}</span>
-        </span>
-        <span class="cum-refresh" aria-hidden="true"></span>
+      <span class="cum-section cum-window">
+        <span class="cum-status-dot"></span>
+        <span class="cum-window-label">${escapeHtml(usageState.windowLabel)}</span>
+        <span class="cum-plan-badge">${escapeHtml(usageState.plan || "Pro")}</span>
+      </span>
+      <span class="cum-section cum-usage">
+        <span class="cum-percent">${percentText}</span>
+        <span class="cum-progress-track"><span class="cum-progress-fill"></span></span>
+      </span>
+      <span class="cum-section cum-reset">${escapeHtml(usageState.resetText || "open usage to sync")}</span>
+      <span class="cum-section cum-messages">
+        <span class="cum-icon">${ICONS.message}</span>
+        <span>${messageText}</span>
+      </span>
+      <span class="cum-section cum-tokens">${escapeHtml(tokenText)}</span>
+      <span class="cum-section cum-open">
+        <span class="cum-icon">${ICONS.external}</span>
       </span>
     `;
 
     if (html !== lastRenderedHtml) {
-      root.innerHTML = html;
+      bar.innerHTML = html;
       lastRenderedHtml = html;
     }
   }
 
-  function placeRoot(composerArg) {
-    if (!root || root.hidden) {
-      return;
+  function injectBarAfterComposer(composer) {
+    if (!bar) {
+      bar = document.createElement("button");
+      bar.id = ROOT_ID;
+      bar.type = "button";
+      bar.className = "claude-usage-meter";
+      bar.addEventListener("click", () => window.location.assign(SETTINGS_URL));
     }
 
-    const composer = composerArg && composerArg.getBoundingClientRect ? composerArg : findComposer();
-    if (!composer) {
-      return;
+    if (composer.nextSibling !== bar) {
+      composer.parentNode.insertBefore(bar, composer.nextSibling);
     }
 
+    syncBarLayoutWithComposer(composer);
+  }
+
+  function syncBarLayoutWithComposer(composer) {
     const rect = composer.getBoundingClientRect();
-    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
-    const rootHeight = root.offsetHeight || 28;
-    const width = Math.min(rect.width || viewportWidth - 32, viewportWidth - 32);
-    const left = Math.max(16, Math.min(rect.left, viewportWidth - width - 16));
-    const top = Math.min(window.innerHeight - rootHeight - 6, rect.bottom + 6);
+    const computed = window.getComputedStyle(composer);
 
-    setStyleIfChanged(root, "left", `${Math.round(left)}px`);
-    setStyleIfChanged(root, "top", `${Math.round(Math.max(4, top))}px`);
-    setStyleIfChanged(root, "width", `${Math.round(width)}px`);
+    bar.style.width = `${Math.round(rect.width)}px`;
+    bar.style.maxWidth = computed.maxWidth && computed.maxWidth !== "none" ? computed.maxWidth : "100%";
+    bar.style.marginLeft = computed.marginLeft;
+    bar.style.marginRight = computed.marginRight;
   }
 
-  function setStyleIfChanged(element, property, value) {
-    if (element.style[property] !== value) {
-      element.style[property] = value;
+  function removeBar() {
+    if (bar && bar.parentNode) {
+      bar.parentNode.removeChild(bar);
     }
+    lastRenderedHtml = "";
   }
 
-  function findComposer(force = false) {
+  function findComposerContainer(force = false) {
     const now = Date.now();
-    if (
-      !force &&
-      cachedComposer &&
-      now < nextComposerScanAt &&
-      isVisibleComposer(cachedComposer)
-    ) {
+    if (!force && isUsableComposer(cachedComposer) && now < nextComposerScanAt) {
       return cachedComposer;
     }
 
-    const activeComposer = cacheComposerFromNode(document.activeElement);
-    if (activeComposer) {
-      return activeComposer;
-    }
+    const candidates = Array.from(
+      document.querySelectorAll("textarea,[contenteditable='true']")
+    )
+      .filter((node) => !node.closest(`#${ROOT_ID}`))
+      .slice(-30)
+      .reverse();
 
-    const candidateSelectors = [
-      "[data-testid*='composer' i]",
-      "[data-testid*='prompt' i]",
-      "textarea[placeholder*='message' i]",
-      "textarea[aria-label*='message' i]",
-      "textarea",
-      "[contenteditable='true'][aria-label*='message' i]",
-      "[contenteditable='true']"
-    ];
-
-    for (const selector of candidateSelectors) {
-      let nodes = [];
-      try {
-        nodes = Array.from(document.querySelectorAll(selector)).slice(-25).reverse();
-      } catch (_error) {
-        continue;
-      }
-
-      for (const node of nodes) {
-        const composer = cacheComposerFromNode(node);
-        if (composer) {
-          return composer;
-        }
+    for (const candidate of candidates) {
+      const composer = findComposerAncestor(candidate);
+      if (composer) {
+        cachedComposer = composer;
+        nextComposerScanAt = Date.now() + COMPOSER_CACHE_MS;
+        return composer;
       }
     }
 
@@ -449,81 +499,64 @@
     return null;
   }
 
-  function cacheComposerFromNode(node) {
-    if (!node || !node.matches) {
-      return null;
-    }
+  function findComposerAncestor(node) {
+    let current = node;
 
-    const rootCandidate = node.matches("form,[data-testid*='composer' i],[data-testid*='prompt' i]")
-      ? node
-      : findComposerRoot(node);
+    for (let depth = 0; current && depth < 12; depth += 1) {
+      if (current.id === ROOT_ID) {
+        return null;
+      }
 
-    if (rootCandidate && isVisibleComposer(rootCandidate)) {
-      cachedComposer = rootCandidate;
-      nextComposerScanAt = Date.now() + COMPOSER_RESCAN_MS;
-      return rootCandidate;
+      const rect = current.getBoundingClientRect ? current.getBoundingClientRect() : null;
+      if (rect && isComposerLikeBox(current, rect)) {
+        return current;
+      }
+
+      current = current.parentElement;
     }
 
     return null;
   }
 
-  function findComposerRoot(node) {
-    let current = node;
-    for (let depth = 0; current && depth < 8; depth += 1) {
-      if (current.matches && current.matches("form")) {
-        return current;
-      }
-
-      const rect = current.getBoundingClientRect ? current.getBoundingClientRect() : null;
-      const hasInput = current.querySelector && current.querySelector("textarea,[contenteditable='true']");
-      const hasButton = current.querySelector && current.querySelector("button,[role='button']");
-      if (rect && hasInput && hasButton && rect.width > 260 && rect.height >= 42 && rect.height < 260) {
-        return current;
-      }
-      current = current.parentElement;
-    }
-    return node;
-  }
-
-  function isVisibleComposer(node) {
-    if (!node || !node.getBoundingClientRect) {
-      return false;
-    }
-
-    const rect = node.getBoundingClientRect();
+  function isComposerLikeBox(node, rect) {
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-    const input = node.querySelector
-      ? node.querySelector("textarea,[contenteditable='true']")
-      : node.matches && node.matches("textarea,[contenteditable='true']")
-        ? node
-        : null;
+    const hasInput = node.querySelector && node.querySelector("textarea,[contenteditable='true']");
+    const hasButton = node.querySelector && node.querySelector("button,[role='button']");
 
     return (
-      rect.width > 240 &&
-      rect.height >= 36 &&
-      rect.height < 280 &&
-      rect.bottom > viewportHeight * 0.45 &&
-      rect.top < viewportHeight &&
-      Boolean(input)
+      hasInput &&
+      hasButton &&
+      rect.width >= 300 &&
+      rect.height >= 56 &&
+      rect.height <= 360 &&
+      rect.bottom > viewportHeight * 0.35 &&
+      rect.top < viewportHeight
     );
   }
 
-  function isComposerInput(target) {
-    if (!target || !target.closest) {
-      return false;
-    }
+  function isUsableComposer(node) {
+    return Boolean(node && node.isConnected && isComposerLikeBox(node, node.getBoundingClientRect()));
+  }
 
-    const editable = target.closest("textarea,[contenteditable='true']");
+  function isComposerInput(target) {
+    const editable = target && target.closest
+      ? target.closest("textarea,[contenteditable='true']")
+      : null;
     if (!editable) {
       return false;
     }
 
-    const composer = cacheComposerFromNode(editable) || findComposer();
+    const composer = findComposerContainer();
     return Boolean(composer && composer.contains(editable));
   }
 
   function looksLikeSendButton(button) {
     if (!button || button.disabled || button.getAttribute("aria-disabled") === "true") {
+      return false;
+    }
+
+    const composer = findComposerContainer();
+    if (!composer || !composer.contains(button)) {
       return false;
     }
 
@@ -535,56 +568,45 @@
       .filter(Boolean)
       .join(" ");
 
-    const composer = cacheComposerFromNode(button) || findComposer();
-    if (!composer || !composer.contains(button)) {
-      return false;
-    }
-
     if (/send|submit|arrow up|paper plane/i.test(label)) {
       return true;
     }
 
     const rect = button.getBoundingClientRect();
     const composerRect = composer.getBoundingClientRect();
-    return rect.width <= 56 && rect.height <= 56 && rect.right > composerRect.right - 90;
+    return rect.width <= 64 && rect.height <= 64 && rect.right > composerRect.right - 120;
   }
 
-  function capturePotentialSend(target, _source) {
-    const composer = cacheComposerFromNode(target) || findComposer();
+  function capturePotentialSend(target) {
+    const composer = findComposerContainer();
     if (!composer) {
       return;
     }
 
-    const text = getPromptText(target, composer);
-    const normalized = normalizePrompt(text);
-    if (!normalized) {
+    const promptText = normalizePrompt(getPromptText(target, composer));
+    if (!promptText) {
       return;
     }
 
-    window.setTimeout(() => recordSentMessage(normalized, Date.now()), 80);
+    window.setTimeout(() => recordSentMessage(promptText, Date.now()), 80);
   }
 
   function getPromptText(target, composer) {
     const scope = composer || (target && target.closest && target.closest("form")) || document;
-    const textareas = scope.querySelectorAll ? Array.from(scope.querySelectorAll("textarea")) : [];
-    const textarea = textareas.find((item) => item.value && item.value.trim()) || textareas[0];
-    if (textarea && textarea.value) {
+    const textarea = Array.from(scope.querySelectorAll("textarea")).find((item) => item.value.trim());
+    if (textarea) {
       return textarea.value;
     }
 
-    const editables = scope.querySelectorAll
-      ? Array.from(scope.querySelectorAll("[contenteditable='true']"))
-      : [];
-    const editable = editables.find((item) => item.innerText && item.innerText.trim());
+    const editable = Array.from(scope.querySelectorAll("[contenteditable='true']")).find((item) =>
+      (item.innerText || "").trim()
+    );
     return editable ? editable.innerText : "";
   }
 
-  function normalizePrompt(text) {
-    return String(text || "").replace(/\s+/g, " ").trim();
-  }
-
   function recordSentMessage(text, now) {
-    rollDayIfNeeded();
+    rollDayIfNeeded(state);
+
     const hash = hashText(text);
     const duplicate = state.recentSends.some(
       (item) => item.hash === hash && now - item.at < RECENT_SEND_WINDOW_MS
@@ -594,42 +616,41 @@
     }
 
     state.recentSends = state.recentSends
-      .filter((item) => now - item.at < 1000 * 60 * 60)
+      .filter((item) => now - item.at < 60 * 60 * 1000)
       .concat({ hash, at: now });
     state.todayMessages += 1;
     state.todayTokens += estimateTokens(text);
-    state.tokenSource = "estimated";
+    state.tokensExact = false;
 
     const chat = ensureChat(getChatKey());
     chat.count += 1;
     chat.updatedAt = now;
+
     scheduleSave();
-    scheduleUpdate({}, 0);
+    scheduleUpdate({});
   }
 
-  function updateChatCount() {
+  function updateChatCountFromVisibleMessages() {
     lastChatScanAt = Date.now();
-    const chat = ensureChat(getChatKey());
-    const scanned = countVisibleUserMessages();
-    if (scanned > chat.count) {
-      chat.count = scanned;
-      chat.updatedAt = Date.now();
-      scheduleSave();
+    if (!isRealChatRoute()) {
+      return;
     }
-  }
 
-  function countVisibleUserMessages() {
     const selectors = [
       "[data-testid='user-message']",
       "[data-testid*='user-message' i]",
       "[data-message-author-role='user']",
+      "[data-message-author-role='human']",
       "[data-author='user']",
+      "[data-author='human']",
       "[data-role='user']",
+      "[data-role='human']",
       "[aria-label='Your message']",
       "[aria-label*='user message' i]"
     ];
-
     const unique = new Set();
+    let hasExplicitMessageMarkers = false;
+
     for (const selector of selectors) {
       let nodes = [];
       try {
@@ -639,28 +660,59 @@
       }
 
       nodes.forEach((node) => {
-        if (isLikelyMessageNode(node)) {
-          unique.add(getStableNodeKey(node));
+        const text = normalizePrompt(node.innerText || node.textContent || "");
+        const rect = node.getBoundingClientRect();
+        if (text && rect.width > 120 && rect.height > 12 && !node.closest(`#${ROOT_ID}`)) {
+          unique.add(hashText(text.slice(0, 400)));
+          hasExplicitMessageMarkers = true;
         }
       });
     }
 
-    return unique.size;
-  }
-
-  function isLikelyMessageNode(node) {
-    if (!node || !node.getBoundingClientRect) {
-      return false;
+    if (unique.size === 0) {
+      collectLikelyUserMessages().forEach((text) => unique.add(hashText(text.slice(0, 400))));
     }
-    const rect = node.getBoundingClientRect();
-    const text = normalizePrompt(node.innerText || node.textContent || "");
-    return rect.width > 120 && rect.height > 12 && text.length > 0 && !node.closest(`#${ROOT_ID}`);
+
+    const chat = ensureChat(getChatKey());
+    const shouldReplaceCount = hasExplicitMessageMarkers && unique.size > 0 && unique.size !== chat.count;
+    const shouldIncreaseCount = !hasExplicitMessageMarkers && unique.size > chat.count;
+    if (shouldReplaceCount || shouldIncreaseCount) {
+      chat.count = unique.size;
+      chat.updatedAt = Date.now();
+      scheduleSave();
+    }
   }
 
-  function getStableNodeKey(node) {
-    const text = normalizePrompt(node.innerText || node.textContent || "");
-    const rect = node.getBoundingClientRect();
-    return `${Math.round(rect.top)}:${hashText(text.slice(0, 200))}`;
+  function collectLikelyUserMessages() {
+    const main = document.querySelector("main") || document.body;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+    const texts = [];
+    const nodes = Array.from(
+      main.querySelectorAll("article, [class*='message' i], [class*='bubble' i], [class*='justify-end' i], [class*='items-end' i]")
+    ).slice(-200);
+
+    nodes.forEach((node) => {
+      if (node.closest(`#${ROOT_ID}`) || node.querySelector("textarea,[contenteditable='true']")) {
+        return;
+      }
+
+      const rect = node.getBoundingClientRect();
+      const text = normalizePrompt(node.innerText || node.textContent || "");
+      const isRightSide = rect.left > viewportWidth * 0.28 || rect.right > viewportWidth * 0.72;
+
+      if (
+        isRightSide &&
+        text.length > 0 &&
+        text.length < 5000 &&
+        rect.width > 120 &&
+        rect.height > 18 &&
+        rect.top < window.innerHeight + 600
+      ) {
+        texts.push(text);
+      }
+    });
+
+    return Array.from(new Set(texts));
   }
 
   function ensureChat(chatKey) {
@@ -677,101 +729,30 @@
   function getChatKey() {
     const path = window.location.pathname.replace(/\/+$/, "") || "/";
     const match = path.match(/\/chat\/([^/?#]+)/i);
-    if (match) {
-      return `chat:${match[1]}`;
-    }
-    return `path:${path}`;
+    return match ? `chat:${match[1]}` : `path:${path}`;
+  }
+
+  function isRealChatRoute() {
+    return /^\/chat\/[^/?#]+/i.test(window.location.pathname);
   }
 
   function isUsageSettingsPage() {
     return /\/settings\/usage\/?$/i.test(window.location.pathname);
   }
 
-  function scrapeUsagePage(force = false) {
-    if (!document.body || !isUsageSettingsPage()) {
+  function rollDayIfNeeded(targetState, shouldSave = true) {
+    if (targetState.day === getDayKey()) {
       return;
     }
 
-    const now = Date.now();
-    if (!force && now - lastUsageScrapeAt < USAGE_SCRAPE_INTERVAL_MS) {
-      return;
-    }
-    lastUsageScrapeAt = now;
-
-    const parsed = parseUsageFromDom(document.body.innerText || "");
-    if (parsed) {
-      mergeUsage(parsed, "page");
-    }
-  }
-
-  function mergeUsage(parsed, source) {
-    let changed = false;
-
-    if (parsed.plan && parsed.plan !== state.usage.plan) {
-      state.usage.plan = parsed.plan;
-      changed = true;
-    }
-    if (Number.isFinite(parsed.sessionPercent) && parsed.sessionPercent !== state.usage.sessionPercent) {
-      state.usage.sessionPercent = parsed.sessionPercent;
-      changed = true;
-    }
-    if (parsed.sessionReset && parsed.sessionReset !== state.usage.sessionReset) {
-      state.usage.sessionReset = parsed.sessionReset;
-      changed = true;
-    }
-    if (Number.isFinite(parsed.weeklyPercent) && parsed.weeklyPercent !== state.usage.weeklyPercent) {
-      state.usage.weeklyPercent = parsed.weeklyPercent;
-      changed = true;
-    }
-    if (parsed.weeklyReset && parsed.weeklyReset !== state.usage.weeklyReset) {
-      state.usage.weeklyReset = parsed.weeklyReset;
-      changed = true;
-    }
-    if (Number.isFinite(parsed.todayMessages) && parsed.todayMessages > state.todayMessages) {
-      state.todayMessages = parsed.todayMessages;
-      changed = true;
-    }
-    if (Number.isFinite(parsed.todayTokens) && parsed.todayTokens > state.todayTokens) {
-      state.todayTokens = parsed.todayTokens;
-      state.tokenSource = "exact";
-      changed = true;
-    }
-
-    if (changed) {
-      state.usage.updatedAt = Date.now();
-      state.usage.source = source;
+    targetState.day = getDayKey();
+    targetState.todayMessages = 0;
+    targetState.todayTokens = 0;
+    targetState.tokensExact = false;
+    targetState.recentSends = [];
+    if (shouldSave) {
       scheduleSave();
-      render();
     }
-  }
-
-  function parseUsageFromDom(text) {
-    const clean = normalizeLines(text);
-    if (!/usage|current session|weekly|resets/i.test(clean)) {
-      return null;
-    }
-
-    const currentBlock = blockBetween(clean, /Current session/i, /Weekly/i) || clean;
-    const weeklyBlock = blockBetween(clean, /Weekly/i, /Today|Updated|Settings|Quit/i) || "";
-    const planMatch = clean.match(/Plan usage limits\s+([A-Za-z][\w -]{1,24})/i);
-    const todayBlock = blockBetween(clean, /Today/i, /Updated|Settings|Quit/i) || "";
-
-    return compactParsed({
-      plan: planMatch ? planMatch[1].trim() : "",
-      sessionPercent: pickPercent(currentBlock),
-      sessionReset: pickReset(currentBlock),
-      weeklyPercent: pickPercent(weeklyBlock),
-      weeklyReset: pickReset(weeklyBlock),
-      todayMessages: pickMetric(todayBlock, /Messages/i),
-      todayTokens: pickMetric(todayBlock, /Tokens/i)
-    });
-  }
-
-  function compactParsed(parsed) {
-    const hasValue = Object.values(parsed).some(
-      (value) => value !== null && value !== undefined && value !== ""
-    );
-    return hasValue ? parsed : null;
   }
 
   function normalizeLines(text) {
@@ -788,9 +769,15 @@
     if (start < 0) {
       return "";
     }
+
     const rest = text.slice(start);
     const end = rest.slice(1).search(endRe);
     return end >= 0 ? rest.slice(0, end + 1) : rest;
+  }
+
+  function pickPlan(text) {
+    const match = text.match(/Plan usage limits\s+([A-Za-z][\w -]{1,24})/i);
+    return match ? match[1].trim() : "";
   }
 
   function pickPercent(text) {
@@ -798,16 +785,13 @@
     if (!matches.length) {
       return null;
     }
-    const value = Number(matches[matches.length - 1][1]);
-    return value >= 0 && value <= 100 ? value : null;
+
+    return coercePercent(Number(matches[matches.length - 1][1]));
   }
 
-  function pickReset(text) {
+  function pickResetText(text) {
     const match = String(text || "").match(/Resets?\s+(?:in\s+)?([^\n]+)/i);
-    if (!match) {
-      return "";
-    }
-    return match[1].replace(/\s+/g, " ").trim();
+    return match ? match[1].replace(/\s+/g, " ").trim() : "";
   }
 
   function pickMetric(text, labelRe) {
@@ -816,10 +800,12 @@
       if (!labelRe.test(lines[index])) {
         continue;
       }
+
       const sameLine = parseCompactNumber(lines[index]);
       if (Number.isFinite(sameLine)) {
         return sameLine;
       }
+
       const nextLine = parseCompactNumber(lines[index + 1] || "");
       if (Number.isFinite(nextLine)) {
         return nextLine;
@@ -833,36 +819,73 @@
     if (!match) {
       return null;
     }
+
     const multiplier = match[2]
       ? { k: 1000, m: 1000000, b: 1000000000 }[match[2].toLowerCase()]
       : 1;
     return Math.round(Number(match[1]) * multiplier);
   }
 
-  function compactReset(value) {
-    const text = String(value || "").trim();
-    if (!text) {
-      return "";
+  function parseResetAt(text) {
+    const duration = parseDurationMs(text);
+    return duration > 0 ? Math.round((Date.now() + duration) / 60000) * 60000 : null;
+  }
+
+  function parseDurationMs(text) {
+    let total = 0;
+    const pattern = /(\d+(?:\.\d+)?)\s*(d|day|days|h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b/gi;
+    let match;
+
+    while ((match = pattern.exec(String(text || "")))) {
+      const value = Number(match[1]);
+      const unit = match[2].toLowerCase();
+      if (unit.startsWith("d")) {
+        total += value * 24 * 60 * 60 * 1000;
+      } else if (unit.startsWith("h")) {
+        total += value * 60 * 60 * 1000;
+      } else {
+        total += value * 60 * 1000;
+      }
     }
-    return text
+
+    return total;
+  }
+
+  function getCurrentResetText(usage) {
+    if (Number.isFinite(usage.resetAt)) {
+      return `reset ${formatDuration(usage.resetAt - Date.now())}`;
+    }
+
+    const normalized = normalizeResetText(usage.resetText);
+    return normalized ? `reset ${normalized}` : "";
+  }
+
+  function normalizeResetText(text) {
+    return String(text || "")
+      .trim()
       .replace(/^in\s+/i, "")
-      .replace(/\bhours?\b/gi, "h")
-      .replace(/\bhrs?\b/gi, "h")
-      .replace(/\bminutes?\b/gi, "m")
-      .replace(/\bmins?\b/gi, "m")
+      .replace(/\bhours?\b|\bhrs?\b/gi, "h")
+      .replace(/\bminutes?\b|\bmins?\b/gi, "m")
       .replace(/\s+/g, " ");
   }
 
-  function formatAge(milliseconds) {
-    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
-    if (seconds < 60) {
-      return `${seconds}s`;
+  function formatDuration(milliseconds) {
+    const minutesTotal = Math.max(0, Math.round(milliseconds / 60000));
+    const hours = Math.floor(minutesTotal / 60);
+    const minutes = minutesTotal % 60;
+
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
     }
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) {
-      return `${minutes}m`;
+    return `${minutes}m`;
+  }
+
+  function coercePercent(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      return null;
     }
-    return `${Math.floor(minutes / 60)}h`;
+    return Math.max(0, Math.min(100, Math.round(number)));
   }
 
   function estimateTokens(text) {
@@ -872,7 +895,7 @@
     return Math.max(1, Math.ceil(nonCjk / 4 + cjk));
   }
 
-  function formatTokenCount(value) {
+  function formatTokens(value) {
     const number = Math.max(0, Math.round(Number(value) || 0));
     if (number >= 1000000) {
       return `${trimDecimal(number / 1000000)}M`;
@@ -883,19 +906,24 @@
     return String(number);
   }
 
-  function formatInt(value) {
-    return String(Math.max(0, Math.round(Number(value) || 0)));
+  function formatTokenLabel(value, approximate) {
+    const number = Math.max(0, Math.round(Number(value) || 0));
+    if (number === 0 && approximate) {
+      return "tokens today --";
+    }
+    return `tokens today ${approximate ? "~" : ""}${formatTokens(number)}`;
   }
 
   function trimDecimal(value) {
     return value >= 10 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, "");
   }
 
-  function clampPercent(value) {
-    if (!Number.isFinite(value)) {
-      return null;
-    }
-    return Math.max(0, Math.min(100, Math.round(value)));
+  function formatCount(value) {
+    return String(Math.max(0, Math.round(Number(value) || 0)));
+  }
+
+  function normalizePrompt(text) {
+    return String(text || "").replace(/\s+/g, " ").trim();
   }
 
   function getDayKey() {

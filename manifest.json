@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "description": "Shows Claude usage, reset timing, message counts, and estimated tokens below the Claude composer.",
   "icons": {
-    "48": "icons/icon-48.png",
-    "96": "icons/icon-96.png"
+    "48": "icons/joker-48.png",
+    "96": "icons/joker-96.png"
   },
   "permissions": [
     "storage",
