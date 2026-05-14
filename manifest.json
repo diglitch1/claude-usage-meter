@@ -8,10 +8,16 @@
     "96": "icons/joker-96.png"
   },
   "permissions": [
+    "alarms",
     "storage",
     "https://claude.ai/*",
     "https://www.claude.ai/*"
   ],
+  "background": {
+    "scripts": [
+      "src/background.js"
+    ]
+  },
   "content_scripts": [
     {
       "matches": [
@@ -31,7 +37,7 @@
     "gecko": {
       "id": "claude-usage-meter@local", 
       "data_collection_permissions": {
-        "permissions": []
+        "required": ["none"]
       }
     }
   }
