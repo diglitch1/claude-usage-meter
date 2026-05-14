@@ -1,0 +1,220 @@
+#claude-usage-meter-root {
+  align-items: center;
+  appearance: none;
+  background: rgba(37, 37, 35, 0.94);
+  background: color-mix(in srgb, rgb(37 37 35) 94%, transparent);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-color: color-mix(in srgb, rgb(255 255 255) 12%, transparent);
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgb(0 0 0 / 22%);
+  box-sizing: border-box;
+  color: rgb(245 245 241);
+  cursor: pointer;
+  display: flex;
+  font: 500 12px/1.2 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  height: 28px;
+  justify-content: stretch;
+  letter-spacing: 0;
+  margin: 0;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  padding: 0 10px;
+  position: fixed;
+  text-align: left;
+  top: auto;
+  z-index: 2147483646;
+}
+
+#claude-usage-meter-root[hidden] {
+  display: none !important;
+}
+
+#claude-usage-meter-root:hover,
+#claude-usage-meter-root:focus-visible {
+  background: rgba(47, 47, 44, 0.96);
+  background: color-mix(in srgb, rgb(47 47 44) 96%, transparent);
+  border-color: rgba(217, 149, 93, 0.42);
+  border-color: color-mix(in srgb, rgb(217 149 93) 42%, transparent);
+  outline: none;
+}
+
+#claude-usage-meter-root .cum-main {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: max-content minmax(180px, 1fr) max-content max-content 14px;
+  min-width: 0;
+  width: 100%;
+}
+
+#claude-usage-meter-root .cum-title,
+#claude-usage-meter-root .cum-session,
+#claude-usage-meter-root .cum-stat {
+  align-items: center;
+  display: inline-flex;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+#claude-usage-meter-root .cum-title {
+  gap: 6px;
+}
+
+#claude-usage-meter-root .cum-mark {
+  background: rgb(213 132 82);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px rgb(213 132 82 / 12%);
+  display: inline-block;
+  height: 7px;
+  width: 7px;
+}
+
+#claude-usage-meter-root .cum-name {
+  color: rgb(245 245 241);
+  font-weight: 700;
+}
+
+#claude-usage-meter-root .cum-plan {
+  background: rgb(130 91 65 / 38%);
+  border-radius: 6px;
+  color: rgb(225 146 91);
+  font-weight: 650;
+  max-width: 72px;
+  overflow: hidden;
+  padding: 2px 6px;
+  text-overflow: ellipsis;
+}
+
+#claude-usage-meter-root .cum-session {
+  color: rgb(214 211 204);
+  gap: 8px;
+}
+
+#claude-usage-meter-root .cum-session-number {
+  color: rgb(255 255 255);
+  font-weight: 760;
+  min-width: 32px;
+  text-align: right;
+}
+
+#claude-usage-meter-root .cum-progress {
+  background: rgb(255 255 255 / 10%);
+  border-radius: 99px;
+  display: inline-flex;
+  height: 6px;
+  min-width: 68px;
+  overflow: hidden;
+  width: 100%;
+}
+
+#claude-usage-meter-root .cum-progress-fill {
+  background: linear-gradient(90deg, rgb(126 178 135), rgb(66 145 229));
+  border-radius: inherit;
+  display: block;
+  min-width: 0;
+}
+
+#claude-usage-meter-root .cum-reset {
+  color: rgb(189 185 176);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#claude-usage-meter-root .cum-stat {
+  color: rgb(218 214 207);
+  gap: 5px;
+}
+
+#claude-usage-meter-root .cum-stat-label {
+  color: rgb(160 156 148);
+  font-weight: 600;
+}
+
+#claude-usage-meter-root .cum-stat-value {
+  color: rgb(248 248 244);
+  font-variant-numeric: tabular-nums;
+  font-weight: 760;
+}
+
+#claude-usage-meter-root .cum-refresh {
+  border: 2px solid rgb(165 160 150 / 72%);
+  border-left-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  height: 12px;
+  justify-self: end;
+  width: 12px;
+}
+
+@media (max-width: 720px) {
+  #claude-usage-meter-root {
+    height: 48px;
+    padding: 6px 8px;
+  }
+
+  #claude-usage-meter-root .cum-main {
+    gap: 5px 8px;
+    grid-template-columns: max-content minmax(120px, 1fr) 12px;
+    grid-template-rows: 16px 16px;
+  }
+
+  #claude-usage-meter-root .cum-title {
+    grid-column: 1;
+  }
+
+  #claude-usage-meter-root .cum-session {
+    grid-column: 2;
+  }
+
+  #claude-usage-meter-root .cum-stat {
+    grid-row: 2;
+  }
+
+  #claude-usage-meter-root .cum-refresh {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+
+  #claude-usage-meter-root .cum-stat-label {
+    display: none;
+  }
+}
+
+@media (max-width: 440px) {
+  #claude-usage-meter-root {
+    height: 30px;
+  }
+
+  #claude-usage-meter-root .cum-title {
+    display: none;
+  }
+
+  #claude-usage-meter-root .cum-main {
+    grid-template-columns: minmax(140px, 1fr) max-content max-content 12px;
+    grid-template-rows: 1fr;
+  }
+
+  #claude-usage-meter-root .cum-session {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  #claude-usage-meter-root .cum-progress {
+    min-width: 50px;
+  }
+
+  #claude-usage-meter-root .cum-reset {
+    display: none;
+  }
+
+  #claude-usage-meter-root .cum-stat {
+    grid-column: auto;
+    grid-row: 1;
+  }
+
+  #claude-usage-meter-root .cum-refresh {
+    grid-column: 4;
+    grid-row: 1;
+  }
+}

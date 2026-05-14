@@ -1,0 +1,38 @@
+{
+  "manifest_version": 2,
+  "name": "Claude Usage Meter",
+  "version": "0.1.0",
+  "description": "Shows Claude usage, reset timing, message counts, and estimated tokens below the Claude composer.",
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  },
+  "permissions": [
+    "storage",
+    "https://claude.ai/*",
+    "https://www.claude.ai/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://claude.ai/*",
+        "https://www.claude.ai/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "css": [
+        "src/styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    "src/page-bridge.js"
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "claude-usage-meter@local"
+    }
+  }
+}
