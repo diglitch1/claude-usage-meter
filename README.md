@@ -2,8 +2,9 @@
 
 Firefox WebExtension that adds a compact Claude-style usage meter directly under the message composer on `claude.ai`.
 
-<img width="780" height="203" alt="image" src="https://github.com/user-attachments/assets/5143f3d0-90b5-4ea5-ab1d-d985193a7680" /> <img width="781" height="207" alt="image" src="https://github.com/user-attachments/assets/64c446a5-8d6b-478a-82db-b726f146bd64" /><img width="774" height="199" alt="image" src="https://github.com/user-attachments/assets/f64f71c3-f05f-4b76-8c2d-dbfd872fe050" />
-
+<img width="780" alt="image" src="https://github.com/user-attachments/assets/5143f3d0-90b5-4ea5-ab1d-d985193a7680" />
+<img width="780" alt="image" src="https://github.com/user-attachments/assets/64c446a5-8d6b-478a-82db-b726f146bd64" />
+<img width="780" alt="image" src="https://github.com/user-attachments/assets/f64f71c3-f05f-4b76-8c2d-dbfd872fe050" />
 
 
 
