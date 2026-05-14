@@ -27,9 +27,6 @@
       "run_at": "document_idle"
     }
   ],
-  "web_accessible_resources": [
-    "src/page-bridge.js"
-  ],
   "browser_specific_settings": {
     "gecko": {
       "id": "claude-usage-meter@local"

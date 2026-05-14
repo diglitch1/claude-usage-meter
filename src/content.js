@@ -1,9 +1,12 @@
 (function () {
   const ROOT_ID = "claude-usage-meter-root";
   const STORAGE_KEY = "claudeUsageMeterStateV1";
-  const BRIDGE_SOURCE = "claude-usage-meter-bridge";
   const SETTINGS_URL = "https://claude.ai/settings/usage";
-  const UPDATE_INTERVAL_MS = 1500;
+  const UPDATE_INTERVAL_MS = 3000;
+  const UPDATE_DEBOUNCE_MS = 250;
+  const COMPOSER_RESCAN_MS = 8000;
+  const CHAT_SCAN_INTERVAL_MS = 60000;
+  const USAGE_SCRAPE_INTERVAL_MS = 5000;
   const RECENT_SEND_WINDOW_MS = 9000;
 
   const fallbackStorage = {
@@ -45,18 +48,26 @@
   let lastPath = window.location.pathname;
   let lastChatKey = getChatKey();
   let saveTimer = 0;
+  let updateTimer = 0;
+  let placeRaf = 0;
+  let cachedComposer = null;
+  let nextComposerScanAt = 0;
+  let lastChatScanAt = 0;
+  let lastUsageScrapeAt = 0;
+  let lastRenderedHtml = "";
 
   init();
 
   async function init() {
     state = normalizeState(await loadState());
-    installBridge();
     installInputListeners();
-    installMessageListener();
     installObservers();
     syncFromLocation();
-    update();
-    window.setInterval(update, UPDATE_INTERVAL_MS);
+    scheduleUpdate({ forceComposerScan: true, scanChat: true }, 0);
+    window.setInterval(() => {
+      checkRoute();
+      scheduleUpdate({}, 0);
+    }, UPDATE_INTERVAL_MS);
   }
 
   function getDefaultState() {
@@ -117,25 +128,6 @@
     }, 250);
   }
 
-  function installBridge() {
-    try {
-      const script = document.createElement("script");
-      script.src = getRuntimeUrl("src/page-bridge.js");
-      script.async = false;
-      script.onload = () => script.remove();
-      (document.head || document.documentElement || document.body).appendChild(script);
-    } catch (_error) {
-      // DOM scraping and local counters still work without the bridge.
-    }
-  }
-
-  function getRuntimeUrl(path) {
-    if (typeof browser !== "undefined" && browser.runtime && browser.runtime.getURL) {
-      return browser.runtime.getURL(path);
-    }
-    return chrome.runtime.getURL(path);
-  }
-
   function installInputListeners() {
     document.addEventListener(
       "keydown",
@@ -187,37 +179,65 @@
       },
       true
     );
-  }
 
-  function installMessageListener() {
-    window.addEventListener("message", (event) => {
-      if (event.source !== window || !event.data || event.data.source !== BRIDGE_SOURCE) {
-        return;
-      }
-      const parsed = parseUsageFromText(event.data.body || "");
-      if (parsed) {
-        mergeUsage(parsed, "api");
-      }
-    });
+    document.addEventListener(
+      "focusin",
+      (event) => {
+        if (event.target && event.target.closest) {
+          const editable = event.target.closest("textarea,[contenteditable='true']");
+          if (editable) {
+            cacheComposerFromNode(editable);
+            scheduleUpdate({}, UPDATE_DEBOUNCE_MS);
+          }
+        }
+      },
+      true
+    );
   }
 
   function installObservers() {
-    const observer = new MutationObserver(() => {
-      if (lastPath !== window.location.pathname) {
-        lastPath = window.location.pathname;
-        syncFromLocation();
+    window.addEventListener("resize", schedulePlace, { passive: true });
+    window.addEventListener("scroll", schedulePlace, { passive: true });
+    window.addEventListener("focus", () => scheduleUpdate({ forceComposerScan: true }, 0));
+    window.addEventListener("popstate", () => {
+      checkRoute();
+      scheduleUpdate({ forceComposerScan: true, scanChat: true }, 0);
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        checkRoute();
+        scheduleUpdate({ forceComposerScan: true }, 0);
       }
-      update();
     });
+  }
 
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      characterData: true
+  function checkRoute() {
+    if (lastPath === window.location.pathname) {
+      return false;
+    }
+
+    lastPath = window.location.pathname;
+    cachedComposer = null;
+    nextComposerScanAt = 0;
+    lastChatScanAt = 0;
+    syncFromLocation();
+    return true;
+  }
+
+  function scheduleUpdate(options = {}, delay = UPDATE_DEBOUNCE_MS) {
+    window.clearTimeout(updateTimer);
+    updateTimer = window.setTimeout(() => update(options), delay);
+  }
+
+  function schedulePlace() {
+    if (placeRaf) {
+      return;
+    }
+
+    placeRaf = window.requestAnimationFrame(() => {
+      placeRaf = 0;
+      placeRoot(cachedComposer);
     });
-
-    window.addEventListener("resize", placeRoot, { passive: true });
-    window.addEventListener("scroll", placeRoot, { passive: true });
   }
 
   function syncFromLocation() {
@@ -228,9 +248,9 @@
     }
     ensureChat(chatKey);
     if (isUsageSettingsPage()) {
-      window.setTimeout(scrapeUsagePage, 600);
-      window.setTimeout(scrapeUsagePage, 1800);
-      window.setTimeout(scrapeUsagePage, 3600);
+      scrapeUsagePage(true);
+      window.setTimeout(() => scrapeUsagePage(true), 800);
+      window.setTimeout(() => scrapeUsagePage(true), 2200);
     }
   }
 
@@ -251,13 +271,13 @@
     }
   }
 
-  function update() {
+  function update(options = {}) {
     rollDayIfNeeded();
     if (isUsageSettingsPage()) {
       scrapeUsagePage();
     }
 
-    const composer = findComposer();
+    const composer = findComposer(Boolean(options.forceComposerScan));
     const shouldShow = Boolean(composer) && !isUsageSettingsPage();
     if (!shouldShow) {
       if (root) {
@@ -269,7 +289,9 @@
     root = root || createRoot();
     root.hidden = false;
     placeRoot(composer);
-    updateChatCount();
+    if (options.scanChat || Date.now() - lastChatScanAt > CHAT_SCAN_INTERVAL_MS) {
+      updateChatCount();
+    }
     render();
   }
 
@@ -296,6 +318,7 @@
       window.location.assign(SETTINGS_URL);
     });
     (document.body || document.documentElement).appendChild(element);
+    lastRenderedHtml = "";
     return element;
   }
 
@@ -318,7 +341,8 @@
       ? `updated ${formatAge(Date.now() - state.usage.updatedAt)} ago`
       : "not synced yet";
 
-    root.innerHTML = `
+    root.title = updatedLabel;
+    const html = `
       <span class="cum-main">
         <span class="cum-title">
           <span class="cum-mark" aria-hidden="true"></span>
@@ -340,9 +364,14 @@
           <span class="cum-stat-label">tokens today</span>
           <span class="cum-stat-value">${tokenPrefix}${tokensLabel}</span>
         </span>
-        <span class="cum-refresh" title="${escapeHtml(updatedLabel)}" aria-hidden="true"></span>
+        <span class="cum-refresh" aria-hidden="true"></span>
       </span>
     `;
+
+    if (html !== lastRenderedHtml) {
+      root.innerHTML = html;
+      lastRenderedHtml = html;
+    }
   }
 
   function placeRoot(composerArg) {
@@ -362,19 +391,39 @@
     const left = Math.max(16, Math.min(rect.left, viewportWidth - width - 16));
     const top = Math.min(window.innerHeight - rootHeight - 6, rect.bottom + 6);
 
-    root.style.left = `${Math.round(left)}px`;
-    root.style.top = `${Math.round(Math.max(4, top))}px`;
-    root.style.width = `${Math.round(width)}px`;
+    setStyleIfChanged(root, "left", `${Math.round(left)}px`);
+    setStyleIfChanged(root, "top", `${Math.round(Math.max(4, top))}px`);
+    setStyleIfChanged(root, "width", `${Math.round(width)}px`);
   }
 
-  function findComposer() {
+  function setStyleIfChanged(element, property, value) {
+    if (element.style[property] !== value) {
+      element.style[property] = value;
+    }
+  }
+
+  function findComposer(force = false) {
+    const now = Date.now();
+    if (
+      !force &&
+      cachedComposer &&
+      now < nextComposerScanAt &&
+      isVisibleComposer(cachedComposer)
+    ) {
+      return cachedComposer;
+    }
+
+    const activeComposer = cacheComposerFromNode(document.activeElement);
+    if (activeComposer) {
+      return activeComposer;
+    }
+
     const candidateSelectors = [
-      "form:has(textarea)",
-      "form:has([contenteditable='true'])",
       "[data-testid*='composer' i]",
       "[data-testid*='prompt' i]",
       "textarea[placeholder*='message' i]",
       "textarea[aria-label*='message' i]",
+      "textarea",
       "[contenteditable='true'][aria-label*='message' i]",
       "[contenteditable='true']"
     ];
@@ -382,19 +431,37 @@
     for (const selector of candidateSelectors) {
       let nodes = [];
       try {
-        nodes = Array.from(document.querySelectorAll(selector));
+        nodes = Array.from(document.querySelectorAll(selector)).slice(-25).reverse();
       } catch (_error) {
         continue;
       }
 
-      for (const node of nodes.reverse()) {
-        const rootCandidate = node.matches && node.matches("form,[data-testid*='composer' i],[data-testid*='prompt' i]")
-          ? node
-          : findComposerRoot(node);
-        if (rootCandidate && isVisibleComposer(rootCandidate)) {
-          return rootCandidate;
+      for (const node of nodes) {
+        const composer = cacheComposerFromNode(node);
+        if (composer) {
+          return composer;
         }
       }
+    }
+
+    cachedComposer = null;
+    nextComposerScanAt = Date.now() + 1000;
+    return null;
+  }
+
+  function cacheComposerFromNode(node) {
+    if (!node || !node.matches) {
+      return null;
+    }
+
+    const rootCandidate = node.matches("form,[data-testid*='composer' i],[data-testid*='prompt' i]")
+      ? node
+      : findComposerRoot(node);
+
+    if (rootCandidate && isVisibleComposer(rootCandidate)) {
+      cachedComposer = rootCandidate;
+      nextComposerScanAt = Date.now() + COMPOSER_RESCAN_MS;
+      return rootCandidate;
     }
 
     return null;
@@ -451,7 +518,7 @@
       return false;
     }
 
-    const composer = findComposer();
+    const composer = cacheComposerFromNode(editable) || findComposer();
     return Boolean(composer && composer.contains(editable));
   }
 
@@ -468,13 +535,13 @@
       .filter(Boolean)
       .join(" ");
 
-    if (/send|submit|arrow up|paper plane/i.test(label)) {
-      return true;
-    }
-
-    const composer = findComposer();
+    const composer = cacheComposerFromNode(button) || findComposer();
     if (!composer || !composer.contains(button)) {
       return false;
+    }
+
+    if (/send|submit|arrow up|paper plane/i.test(label)) {
+      return true;
     }
 
     const rect = button.getBoundingClientRect();
@@ -483,7 +550,7 @@
   }
 
   function capturePotentialSend(target, _source) {
-    const composer = findComposer();
+    const composer = cacheComposerFromNode(target) || findComposer();
     if (!composer) {
       return;
     }
@@ -537,10 +604,11 @@
     chat.count += 1;
     chat.updatedAt = now;
     scheduleSave();
-    update();
+    scheduleUpdate({}, 0);
   }
 
   function updateChatCount() {
+    lastChatScanAt = Date.now();
     const chat = ensureChat(getChatKey());
     const scanned = countVisibleUserMessages();
     if (scanned > chat.count) {
@@ -619,10 +687,17 @@
     return /\/settings\/usage\/?$/i.test(window.location.pathname);
   }
 
-  function scrapeUsagePage() {
-    if (!document.body) {
+  function scrapeUsagePage(force = false) {
+    if (!document.body || !isUsageSettingsPage()) {
       return;
     }
+
+    const now = Date.now();
+    if (!force && now - lastUsageScrapeAt < USAGE_SCRAPE_INTERVAL_MS) {
+      return;
+    }
+    lastUsageScrapeAt = now;
+
     const parsed = parseUsageFromDom(document.body.innerText || "");
     if (parsed) {
       mergeUsage(parsed, "page");
@@ -690,72 +765,6 @@
       todayMessages: pickMetric(todayBlock, /Messages/i),
       todayTokens: pickMetric(todayBlock, /Tokens/i)
     });
-  }
-
-  function parseUsageFromText(text) {
-    if (!text) {
-      return null;
-    }
-
-    const fromJson = parseUsageFromJson(text);
-    if (fromJson) {
-      return fromJson;
-    }
-
-    return parseUsageFromDom(text);
-  }
-
-  function parseUsageFromJson(text) {
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (_error) {
-      return null;
-    }
-
-    const found = {
-      plan: "",
-      sessionPercent: null,
-      sessionReset: "",
-      weeklyPercent: null,
-      weeklyReset: "",
-      todayMessages: null,
-      todayTokens: null
-    };
-
-    walk(data, [], (value, path) => {
-      if (!value || typeof value !== "object" || Array.isArray(value)) {
-        return;
-      }
-
-      const pathText = path.join("_").toLowerCase();
-      const keysText = Object.keys(value).join("_").toLowerCase();
-      const bag = `${pathText}_${keysText}`;
-
-      if (!found.plan && /plan|tier|subscription/.test(bag)) {
-        const plan = pickString(value, /plan|tier|subscription/);
-        if (plan && /^[a-z][\w -]{1,24}$/i.test(plan)) {
-          found.plan = titleCase(plan);
-        }
-      }
-
-      if (/current|session|five|5|hour|window/.test(bag)) {
-        found.sessionPercent = coalesceNumber(found.sessionPercent, pickObjectPercent(value));
-        found.sessionReset = found.sessionReset || pickObjectReset(value);
-      }
-
-      if (/week|weekly/.test(bag)) {
-        found.weeklyPercent = coalesceNumber(found.weeklyPercent, pickObjectPercent(value));
-        found.weeklyReset = found.weeklyReset || pickObjectReset(value);
-      }
-
-      if (/today|daily/.test(bag)) {
-        found.todayMessages = coalesceNumber(found.todayMessages, pickObjectMetric(value, /message|request|prompt/));
-        found.todayTokens = coalesceNumber(found.todayTokens, pickObjectMetric(value, /token/));
-      }
-    });
-
-    return compactParsed(found);
   }
 
   function compactParsed(parsed) {
@@ -830,101 +839,6 @@
     return Math.round(Number(match[1]) * multiplier);
   }
 
-  function walk(value, path, visitor) {
-    visitor(value, path);
-    if (!value || typeof value !== "object") {
-      return;
-    }
-    if (Array.isArray(value)) {
-      value.forEach((item, index) => walk(item, path.concat(String(index)), visitor));
-      return;
-    }
-    Object.keys(value).forEach((key) => walk(value[key], path.concat(key), visitor));
-  }
-
-  function pickString(object, keyRe) {
-    for (const [key, value] of Object.entries(object)) {
-      if (keyRe.test(key) && typeof value === "string") {
-        return value;
-      }
-    }
-    return "";
-  }
-
-  function pickObjectPercent(object) {
-    const direct = pickObjectMetric(object, /percent|percentage|pct/);
-    if (Number.isFinite(direct) && direct >= 0 && direct <= 100) {
-      return Math.round(direct);
-    }
-
-    const used = pickObjectMetric(object, /^used$|used_count|messages_used|tokens_used|usage/);
-    const limit = pickObjectMetric(object, /^limit$|max|quota|allowed|total/);
-    if (Number.isFinite(used) && Number.isFinite(limit) && limit > 0) {
-      return Math.max(0, Math.min(100, Math.round((used / limit) * 100)));
-    }
-    return null;
-  }
-
-  function pickObjectMetric(object, keyRe) {
-    for (const [key, value] of Object.entries(object)) {
-      if (!keyRe.test(key)) {
-        continue;
-      }
-      if (typeof value === "number") {
-        return value;
-      }
-      if (typeof value === "string") {
-        const parsed = parseCompactNumber(value);
-        if (Number.isFinite(parsed)) {
-          return parsed;
-        }
-      }
-    }
-    return null;
-  }
-
-  function pickObjectReset(object) {
-    for (const [key, value] of Object.entries(object)) {
-      if (!/reset|resets|renew|refresh|window_end|expires/i.test(key)) {
-        continue;
-      }
-      if (typeof value === "number") {
-        return formatResetTimestamp(value);
-      }
-      if (typeof value === "string") {
-        if (/^\d+$/.test(value)) {
-          return formatResetTimestamp(Number(value));
-        }
-        return formatResetString(value);
-      }
-    }
-    return "";
-  }
-
-  function coalesceNumber(current, next) {
-    return Number.isFinite(current) ? current : Number.isFinite(next) ? next : current;
-  }
-
-  function formatResetTimestamp(value) {
-    const milliseconds = value > 100000000000 ? value : value * 1000;
-    if (!Number.isFinite(milliseconds)) {
-      return "";
-    }
-    return formatResetString(new Date(milliseconds).toISOString());
-  }
-
-  function formatResetString(value) {
-    const text = String(value || "").trim();
-    const date = new Date(text);
-    if (!Number.isNaN(date.getTime())) {
-      const diff = date.getTime() - Date.now();
-      if (diff > -60000) {
-        return `in ${formatDuration(diff)}`;
-      }
-    }
-    return text.replace(/^in\s+/i, "");
-  }
-
   function compactReset(value) {
     const text = String(value || "").trim();
     if (!text) {
@@ -937,20 +851,6 @@
       .replace(/\bminutes?\b/gi, "m")
       .replace(/\bmins?\b/gi, "m")
       .replace(/\s+/g, " ");
-  }
-
-  function formatDuration(milliseconds) {
-    const totalMinutes = Math.max(0, Math.round(milliseconds / 60000));
-    const days = Math.floor(totalMinutes / 1440);
-    const hours = Math.floor((totalMinutes % 1440) / 60);
-    const minutes = totalMinutes % 60;
-    if (days > 0) {
-      return `${days}d ${hours}h`;
-    }
-    if (hours > 0) {
-      return `${hours}h ${minutes}m`;
-    }
-    return `${minutes}m`;
   }
 
   function formatAge(milliseconds) {
@@ -996,14 +896,6 @@
       return null;
     }
     return Math.max(0, Math.min(100, Math.round(value)));
-  }
-
-  function titleCase(value) {
-    return String(value || "")
-      .replace(/[_-]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .replace(/\b\w/g, (char) => char.toUpperCase());
   }
 
   function getDayKey() {
