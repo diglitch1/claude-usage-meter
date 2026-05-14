@@ -29,7 +29,10 @@
   ],
   "browser_specific_settings": {
     "gecko": {
-      "id": "claude-usage-meter@local"
+      "id": "claude-usage-meter@local", 
+      "data_collection_permissions": {
+        "permissions": []
+      }
     }
   }
 }
