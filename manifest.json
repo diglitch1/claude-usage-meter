@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "Claude Usage Meter",
   "version": "0.1.0",
-  "description": "Shows Claude usage, reset timing, message counts, and estimated tokens below the Claude composer.",
+  "description": "Shows Claude usage, reset timing, and estimated conversation and daily tokens below the Claude composer.",
   "icons": {
     "48": "icons/joker-48.png",
     "96": "icons/joker-96.png"
