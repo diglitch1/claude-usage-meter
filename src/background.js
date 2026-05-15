@@ -1,11 +1,17 @@
 (function () {
   const STORAGE_KEY = "claudeUsageMeterStateV2";
+  const CONV_TOKENS_KEY = "conversationTokens";
+  const DAILY_TOKENS_KEY = "dailyTokens";
+  const CONVERSATION_TOKENS_UI_KEY = "conversationTokensUI";
   const ALARM_NAME = "refresh-usage";
   const NORMAL_PERIOD_MINUTES = 1.5;
   const BACKOFF_PERIOD_MINUTES = 5;
   const FAILURE_BACKOFF_THRESHOLD = 2;
+  const CONTEXT_LIMIT = 200000;
+  const CONV_FETCH_INTERVAL_MS = 15000;
   const MESSAGE_REFRESH_USAGE = "CUM_REFRESH_USAGE";
   const MESSAGE_ORG_ID_DETECTED = "CUM_ORG_ID_DETECTED";
+  const MESSAGE_UPDATE_CONV_TOKENS = "CUM_UPDATE_CONV_TOKENS";
 
   const extensionApi =
     typeof browser !== "undefined"
@@ -88,6 +94,13 @@
         orgId: message.orgId,
         reason: message.reason || "message"
       });
+    }
+
+    if (message.type === MESSAGE_UPDATE_CONV_TOKENS) {
+      return updateConversationAndDailyTokens(message.orgId, message.conversationId).then((uiState) => ({
+        ok: Boolean(uiState),
+        conversationTokensUI: uiState
+      }));
     }
 
     return null;
@@ -398,6 +411,167 @@
     });
   }
 
+  async function fetchConversationTokens(orgId, conversationId) {
+    const normalizedOrgId = normalizeOrgId(orgId);
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    if (!normalizedOrgId || !normalizedConversationId) {
+      return null;
+    }
+
+    const url =
+      `https://claude.ai/api/organizations/${encodeURIComponent(normalizedOrgId)}` +
+      `/chat_conversations/${encodeURIComponent(normalizedConversationId)}` +
+      "?tree=true&rendering_mode=messages&render_all_tools=true";
+
+    let response = null;
+    try {
+      response = await fetch(url, {
+        credentials: "include",
+        headers: {
+          "anthropic-client-platform": "web_claude_ai",
+          "content-type": "application/json"
+        }
+      });
+    } catch (_error) {
+      return null;
+    }
+
+    if (!response || !response.ok) {
+      return null;
+    }
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (_error) {
+      return null;
+    }
+
+    const totalText = extractConversationText(data);
+    const encode = getTokenizerEncode();
+    if (!encode) {
+      return null;
+    }
+
+    try {
+      return encode(totalText).length;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  async function updateConversationAndDailyTokens(orgId, conversationId) {
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    if (!normalizeOrgId(orgId) || !normalizedConversationId) {
+      return null;
+    }
+
+    const tokenCount = await fetchConversationTokens(orgId, normalizedConversationId);
+    if (tokenCount === null) {
+      return null;
+    }
+
+    const today = getDailyTokenDayKey();
+    const stored = await storageGet([CONV_TOKENS_KEY, DAILY_TOKENS_KEY]);
+    const convState = stored && stored[CONV_TOKENS_KEY] && typeof stored[CONV_TOKENS_KEY] === "object"
+      ? stored[CONV_TOKENS_KEY]
+      : {};
+    let dailyState = stored && stored[DAILY_TOKENS_KEY] && typeof stored[DAILY_TOKENS_KEY] === "object"
+      ? stored[DAILY_TOKENS_KEY]
+      : {};
+
+    if (dailyState.date !== today) {
+      dailyState = { date: today, total: 0, seen: {} };
+    }
+    if (!dailyState.seen || typeof dailyState.seen !== "object") {
+      dailyState.seen = {};
+    }
+
+    const previousConversationCount = Number(convState[normalizedConversationId]);
+    const previousCount = Number.isFinite(previousConversationCount)
+      ? previousConversationCount
+      : 0;
+    const delta = Math.max(0, tokenCount - previousCount);
+
+    convState[normalizedConversationId] = tokenCount;
+    dailyState.seen[normalizedConversationId] = tokenCount;
+    dailyState.total = (Number.isFinite(Number(dailyState.total)) ? Number(dailyState.total) : 0) + delta;
+
+    const uiState = {
+      conversationId: normalizedConversationId,
+      conversationTokens: tokenCount,
+      dailyTotal: dailyState.total,
+      updatedAt: Date.now()
+    };
+
+    await storageSet({
+      [CONV_TOKENS_KEY]: convState,
+      [DAILY_TOKENS_KEY]: dailyState,
+      [CONVERSATION_TOKENS_UI_KEY]: uiState
+    });
+
+    return uiState;
+  }
+
+  function extractConversationText(data) {
+    const messages = data && Array.isArray(data.chat_messages) ? data.chat_messages : [];
+    const parts = [];
+
+    for (const message of messages) {
+      if (!message || typeof message !== "object") {
+        continue;
+      }
+
+      appendContentText(parts, message.content, 0);
+      if (typeof message.text === "string") {
+        parts.push(message.text);
+      }
+    }
+
+    return parts.length ? `${parts.join("\n")}\n` : "";
+  }
+
+  function appendContentText(parts, value, depth) {
+    if (value == null || depth > 4) {
+      return;
+    }
+
+    if (typeof value === "string") {
+      parts.push(value);
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => appendContentText(parts, item, depth + 1));
+      return;
+    }
+
+    if (typeof value !== "object") {
+      return;
+    }
+
+    if (typeof value.text === "string") {
+      parts.push(value.text);
+    }
+    if (typeof value.content === "string" || Array.isArray(value.content)) {
+      appendContentText(parts, value.content, depth + 1);
+    }
+  }
+
+  function getTokenizerEncode() {
+    if (typeof globalThis !== "undefined" && typeof globalThis.__gptTokenizerEncode === "function") {
+      return globalThis.__gptTokenizerEncode;
+    }
+    if (
+      typeof globalThis !== "undefined" &&
+      globalThis.GPTTokenizer_o200k_base &&
+      typeof globalThis.GPTTokenizer_o200k_base.encode === "function"
+    ) {
+      return globalThis.GPTTokenizer_o200k_base.encode;
+    }
+    return null;
+  }
+
   function normalizeUsageResponse(data, previousUsage, now) {
     if (!data || typeof data !== "object") {
       return null;
@@ -469,6 +643,14 @@
     return match ? match[0] : "";
   }
 
+  function normalizeConversationId(value) {
+    const text = String(value || "").trim();
+    const match =
+      text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i) ||
+      text.match(/\b[A-Za-z0-9_-]{12,}\b/);
+    return match ? match[0] : "";
+  }
+
   function rollDayIfNeeded(state, now) {
     const day = getDayKey(now);
     if (state.day === day) {
@@ -535,6 +717,10 @@
     return `${year}-${month}-${day}`;
   }
 
+  function getDailyTokenDayKey() {
+    return new Date().toISOString().slice(0, 10);
+  }
+
   function getErrorMessage(error) {
     return error && error.message ? error.message : String(error || "unknown-error");
   }
@@ -569,5 +755,16 @@
     }
     extensionApi.alarms.create(name, options);
     return Promise.resolve();
+  }
+
+  if (typeof globalThis !== "undefined" && globalThis.__CUM_TEST__) {
+    globalThis.__CUM_TEST_HOOKS__ = {
+      fetchConversationTokens,
+      updateConversationAndDailyTokens,
+      extractConversationText,
+      normalizeConversationId,
+      CONV_FETCH_INTERVAL_MS,
+      CONTEXT_LIMIT
+    };
   }
 })();

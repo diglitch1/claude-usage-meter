@@ -2,30 +2,45 @@
   const ROOT_ID = "claude-usage-meter-root";
   const STORAGE_KEY = "claudeUsageMeterStateV2";
   const LEGACY_STORAGE_KEY = "claudeUsageMeterStateV1";
+  const CONVERSATION_TOKENS_UI_KEY = "conversationTokensUI";
   const SETTINGS_URL = "https://claude.ai/settings/usage";
   const MESSAGE_REFRESH_USAGE = "CUM_REFRESH_USAGE";
   const MESSAGE_ORG_ID_DETECTED = "CUM_ORG_ID_DETECTED";
+  const MESSAGE_UPDATE_CONV_TOKENS = "CUM_UPDATE_CONV_TOKENS";
 
   const RENDER_NEUTRAL_PLACEHOLDERS = true;
   const UPDATE_DEBOUNCE_MS = 350;
   const DOM_POLL_MS = 3000;
   const ORG_SCAN_INTERVAL_MS = 3000;
   const BACKGROUND_REFRESH_MIN_MS = 30000;
+  const CONV_FETCH_INTERVAL_MS = 15000;
   const STORAGE_PULL_MS = 90000;
   const USAGE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
   const ICONS = {
     message:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/><path d="M8 9h8M8 13h5"/></svg>',
+    token:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>',
     external:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>'
   };
 
   const fallbackStorage = {
-    async get(key) {
+    async get(keys) {
       try {
-        const raw = window.localStorage.getItem(key);
-        return raw ? { [key]: JSON.parse(raw) } : {};
+        if (Array.isArray(keys)) {
+          return keys.reduce((result, key) => {
+            const raw = window.localStorage.getItem(key);
+            if (raw) {
+              result[key] = JSON.parse(raw);
+            }
+            return result;
+          }, {});
+        }
+
+        const raw = window.localStorage.getItem(keys);
+        return raw ? { [keys]: JSON.parse(raw) } : {};
       } catch (_error) {
         return {};
       }
@@ -66,6 +81,8 @@
   let storagePullTimer = 0;
   let nextOrgScanAt = 0;
   let lastBackgroundRefreshRequestAt = 0;
+  let lastConvTokenFetchTime = 0;
+  let lastConvTokenFetchId = null;
 
   init();
 
@@ -91,7 +108,8 @@
         updatedAt: 0
       },
       usageByOrg: {},
-      usageFetch: null
+      usageFetch: null,
+      conversationTokensUI: null
     };
   }
 
@@ -99,16 +117,19 @@
     const base = createDefaultState();
     let stored = null;
     let legacy = null;
+    let conversationTokensUI = null;
 
     try {
-      const result = await extensionStorage.get([STORAGE_KEY, LEGACY_STORAGE_KEY]);
+      const result = await extensionStorage.get([STORAGE_KEY, LEGACY_STORAGE_KEY, CONVERSATION_TOKENS_UI_KEY]);
       stored = result && result[STORAGE_KEY];
       legacy = result && result[LEGACY_STORAGE_KEY];
+      conversationTokensUI = normalizeConversationTokensUI(result && result[CONVERSATION_TOKENS_UI_KEY]);
     } catch (_error) {
       stored = null;
     }
 
     const merged = migrateState(Object.assign(base, legacy || {}, stored || {}));
+    merged.conversationTokensUI = conversationTokensUI;
     rollDayIfNeeded(merged, false);
     return merged;
   }
@@ -137,6 +158,7 @@
     output.usageByOrg = input && input.usageByOrg && typeof input.usageByOrg === "object"
       ? input.usageByOrg
       : {};
+    output.conversationTokensUI = normalizeConversationTokensUI(input && input.conversationTokensUI);
 
     return output;
   }
@@ -167,21 +189,27 @@
 
   async function pullStoredState() {
     let stored = null;
+    let conversationTokensUI = null;
     try {
-      const result = await extensionStorage.get([STORAGE_KEY]);
+      const result = await extensionStorage.get([STORAGE_KEY, CONVERSATION_TOKENS_UI_KEY]);
       stored = result && result[STORAGE_KEY];
+      conversationTokensUI = normalizeConversationTokensUI(result && result[CONVERSATION_TOKENS_UI_KEY]);
     } catch (_error) {
       stored = null;
     }
 
-    if (!stored) {
-      return;
-    }
-
     const beforeVersion = getUsageVersion(state);
     const beforeOrgId = state.organizationId || "";
-    mergeStoredUsageState(stored);
-    if (beforeVersion !== getUsageVersion(state) || beforeOrgId !== (state.organizationId || "")) {
+    const beforeTokenText = getCurrentTokenLine();
+    if (stored) {
+      mergeStoredUsageState(stored);
+    }
+    state.conversationTokensUI = conversationTokensUI;
+    if (
+      beforeVersion !== getUsageVersion(state) ||
+      beforeOrgId !== (state.organizationId || "") ||
+      beforeTokenText !== getCurrentTokenLine()
+    ) {
       scheduleUpdate({});
     }
   }
@@ -294,6 +322,44 @@
       })
       .catch(() => {
         // The content script still works without the optional background cache.
+      });
+  }
+
+  function maybeRequestTokenUpdate() {
+    const conversationId = getConversationIdFromUrl();
+    const now = Date.now();
+
+    if (
+      !conversationId ||
+      !state.organizationId ||
+      (
+        conversationId === lastConvTokenFetchId &&
+        now - lastConvTokenFetchTime < CONV_FETCH_INTERVAL_MS
+      )
+    ) {
+      return;
+    }
+
+    lastConvTokenFetchId = conversationId;
+    lastConvTokenFetchTime = now;
+
+    sendRuntimeMessage({
+      type: MESSAGE_UPDATE_CONV_TOKENS,
+      orgId: state.organizationId,
+      conversationId
+    })
+      .then((response) => {
+        const incoming = normalizeConversationTokensUI(response && response.conversationTokensUI);
+        if (incoming) {
+          const beforeTokenText = getCurrentTokenLine();
+          state.conversationTokensUI = incoming;
+          if (beforeTokenText !== getCurrentTokenLine()) {
+            scheduleUpdate({});
+          }
+        }
+      })
+      .catch(() => {
+        // Conversation token counting is best-effort.
       });
   }
 
@@ -580,6 +646,7 @@
       if (orgId && orgId !== previousOrgId) {
         requestBackgroundUsageRefresh("org-detected", true, orgId);
       }
+      maybeRequestTokenUpdate();
 
       if (!bar || !bar.isConnected || !cachedComposer || !cachedComposer.isConnected) {
         scheduleUpdate({ forceComposerScan: true });
@@ -639,6 +706,14 @@
       return null;
     }
 
+    const convUI = normalizeConversationTokensUI(state.conversationTokensUI);
+    const currentConvId = getConversationIdFromUrl();
+    const conversationTokens =
+      convUI && convUI.conversationId === currentConvId
+        ? convUI.conversationTokens
+        : null;
+    const dailyTotal = convUI ? convUI.dailyTotal : null;
+
     return {
       windowLabel: usageData ? usageData.windowLabel : "5h",
       plan: usageData ? usageData.plan : "Pro",
@@ -646,8 +721,8 @@
       resetText: usageData ? usageData.resetText : "open usage to sync",
       chatMessages: null,
       todayMessages: null,
-      tokensToday: null,
-      tokensApproximate: true
+      conversationTokens,
+      dailyTotalTokens: dailyTotal
     };
   }
 
@@ -762,7 +837,7 @@
     const percentText = Number.isFinite(percent) ? `${percent}%` : "--";
     const progress = Number.isFinite(percent) ? `${percent}%` : "0%";
     const messageText = `${formatCountOrUnknown(usageState.chatMessages)} • ${formatCountOrUnknown(usageState.todayMessages)}`;
-    const tokenText = formatTokenLabel(usageState.tokensToday, usageState.tokensApproximate);
+    const tokenText = formatTokenLine(usageState.conversationTokens, usageState.dailyTotalTokens);
 
     bar.dataset.usageTone = tone;
     bar.style.setProperty("--cum-progress", progress);
@@ -783,7 +858,10 @@
         <span class="cum-icon">${ICONS.message}</span>
         <span>${messageText}</span>
       </span>
-      <span class="cum-section cum-tokens">${escapeHtml(tokenText)}</span>
+      <span class="cum-section cum-tokens">
+        <span class="cum-icon">${ICONS.token}</span>
+        <span>${escapeHtml(tokenText)}</span>
+      </span>
       <span class="cum-section cum-open">
         <span class="cum-icon">${ICONS.external}</span>
       </span>
@@ -895,6 +973,11 @@
 
   function isUsageSettingsPage() {
     return /\/settings\/usage\/?$/i.test(window.location.pathname);
+  }
+
+  function getConversationIdFromUrl() {
+    const match = window.location.pathname.match(/\/chat\/([a-f0-9-]+)/i);
+    return match ? match[1] : null;
   }
 
   function rollDayIfNeeded(targetState, shouldSave = true) {
@@ -1009,31 +1092,49 @@
     return Math.max(0, Math.min(100, Math.round(number)));
   }
 
-  function formatTokens(value) {
-    const number = Math.max(0, Math.round(Number(value) || 0));
-    if (number >= 1000000) {
-      return `${trimDecimal(number / 1000000)}M`;
+  function normalizeConversationTokensUI(value) {
+    if (!value || typeof value !== "object") {
+      return null;
     }
-    if (number >= 1000) {
-      return `${trimDecimal(number / 1000)}K`;
+
+    const conversationTokens = Number(value.conversationTokens);
+    const dailyTotal = Number(value.dailyTotal);
+    const updatedAt = Number(value.updatedAt);
+    if (
+      typeof value.conversationId !== "string" ||
+      !value.conversationId ||
+      !Number.isFinite(conversationTokens) ||
+      !Number.isFinite(dailyTotal)
+    ) {
+      return null;
     }
-    return String(number);
+
+    return {
+      conversationId: value.conversationId,
+      conversationTokens: Math.max(0, Math.round(conversationTokens)),
+      dailyTotal: Math.max(0, Math.round(dailyTotal)),
+      updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0
+    };
   }
 
-  function formatTokenLabel(value, approximate) {
-    if (value === null || value === undefined || value === "") {
-      return "tokens today --";
-    }
-    const raw = Number(value);
-    if (!Number.isFinite(raw)) {
-      return "tokens today --";
-    }
-    const number = Math.max(0, Math.round(raw));
-    return `tokens today ${approximate ? "~" : ""}${formatTokens(number)}`;
+  function getCurrentTokenLine() {
+    const convUI = normalizeConversationTokensUI(state.conversationTokensUI);
+    const currentConvId = getConversationIdFromUrl();
+    const conversationTokens = convUI && convUI.conversationId === currentConvId
+      ? convUI.conversationTokens
+      : null;
+    const dailyTotal = convUI ? convUI.dailyTotal : null;
+    return formatTokenLine(conversationTokens, dailyTotal);
   }
 
-  function trimDecimal(value) {
-    return value >= 10 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, "");
+  function formatTokenLine(conversationTokens, dailyTotal) {
+    return `${formatTokenCountOrUnknown(conversationTokens)} • ${formatTokenCountOrUnknown(dailyTotal)}`;
+  }
+
+  function formatTokenCountOrUnknown(value) {
+    return Number.isFinite(Number(value))
+      ? Math.max(0, Math.round(Number(value))).toLocaleString()
+      : "--";
   }
 
   function formatCount(value) {
