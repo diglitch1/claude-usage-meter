@@ -6,4 +6,7 @@
   if (tokenizer && typeof tokenizer.encode === "function") {
     globalThis.__gptTokenizerEncode = tokenizer.encode;
   }
+  if (tokenizer && typeof tokenizer.countTokens === "function") {
+    globalThis.__gptTokenizerCount = tokenizer.countTokens;
+  }
 })();

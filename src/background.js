@@ -447,14 +447,13 @@
       return null;
     }
 
-    const totalText = extractConversationText(data);
-    const encode = getTokenizerEncode();
-    if (!encode) {
+    const countTokens = getTokenizerCounter();
+    if (!countTokens) {
       return null;
     }
 
     try {
-      return encode(totalText).length;
+      return countConversationTokens(data, countTokens);
     } catch (_error) {
       return null;
     }
@@ -501,6 +500,7 @@
       conversationId: normalizedConversationId,
       conversationTokens: tokenCount,
       dailyTotal: dailyState.total,
+      dailyDate: today,
       updatedAt: Date.now()
     };
 
@@ -531,6 +531,10 @@
     return parts.length ? `${parts.join("\n")}\n` : "";
   }
 
+  function countConversationTokens(data, countTextTokens) {
+    return countTextTokens(extractConversationText(data));
+  }
+
   function appendContentText(parts, value, depth) {
     if (value == null || depth > 4) {
       return;
@@ -556,6 +560,22 @@
     if (typeof value.content === "string" || Array.isArray(value.content)) {
       appendContentText(parts, value.content, depth + 1);
     }
+  }
+
+  function getTokenizerCounter() {
+    if (typeof globalThis !== "undefined" && typeof globalThis.__gptTokenizerCount === "function") {
+      return globalThis.__gptTokenizerCount;
+    }
+    if (
+      typeof globalThis !== "undefined" &&
+      globalThis.GPTTokenizer_o200k_base &&
+      typeof globalThis.GPTTokenizer_o200k_base.countTokens === "function"
+    ) {
+      return globalThis.GPTTokenizer_o200k_base.countTokens.bind(globalThis.GPTTokenizer_o200k_base);
+    }
+
+    const encode = getTokenizerEncode();
+    return encode ? (text) => encode(text).length : null;
   }
 
   function getTokenizerEncode() {
@@ -718,7 +738,7 @@
   }
 
   function getDailyTokenDayKey() {
-    return new Date().toISOString().slice(0, 10);
+    return getDayKey(Date.now());
   }
 
   function getErrorMessage(error) {
@@ -762,6 +782,7 @@
       fetchConversationTokens,
       updateConversationAndDailyTokens,
       extractConversationText,
+      countConversationTokens,
       normalizeConversationId,
       CONV_FETCH_INTERVAL_MS,
       CONTEXT_LIMIT

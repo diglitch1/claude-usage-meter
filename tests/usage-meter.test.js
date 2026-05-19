@@ -131,6 +131,9 @@ function createBackgroundHarness(fetchImpl, options = {}) {
     setTimeout,
     __gptTokenizerEncode: options.tokenizer || wordTokenizer
   };
+  if (options.tokenCounter) {
+    context.__gptTokenizerCount = options.tokenCounter;
+  }
   vm.runInNewContext(
     fs.readFileSync(path.join(ROOT, "src/background.js"), "utf8"),
     context,
@@ -156,8 +159,12 @@ function createBackgroundHarness(fetchImpl, options = {}) {
   };
 }
 
-function getUtcDayKey() {
-  return new Date().toISOString().slice(0, 10);
+function getLocalDayKey(timestamp = Date.now()) {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 test("updateConversationAndDailyTokens accumulates same-conversation deltas", async () => {
@@ -180,13 +187,14 @@ test("updateConversationAndDailyTokens accumulates same-conversation deltas", as
   assert.equal(second.dailyTotal, 5);
   assert.equal(harness.getStorage(CONV_TOKENS_KEY)[CONV_A], 5);
   assert.deepEqual(harness.getStorage(DAILY_TOKENS_KEY), {
-    date: getUtcDayKey(),
+    date: getLocalDayKey(),
     total: 5,
     seen: {
       [CONV_A]: 5
     }
   });
   assert.equal(harness.getStorage(CONVERSATION_TOKENS_UI_KEY).dailyTotal, 5);
+  assert.equal(harness.getStorage(CONVERSATION_TOKENS_UI_KEY).dailyDate, getLocalDayKey());
 });
 
 test("daily conversation token accumulator rolls over when the date changes", async () => {
@@ -208,12 +216,13 @@ test("daily conversation token accumulator rolls over when the date changes", as
   assert.equal(uiState.conversationTokens, 104);
   assert.equal(uiState.dailyTotal, 5);
   assert.deepEqual(harness.getStorage(DAILY_TOKENS_KEY), {
-    date: getUtcDayKey(),
+    date: getLocalDayKey(),
     total: 5,
     seen: {
       [CONV_A]: 104
     }
   });
+  assert.equal(uiState.dailyDate, getLocalDayKey());
 });
 
 test("switching conversations calculates daily deltas independently", async () => {
@@ -267,7 +276,42 @@ test("background updates conversation tokens from content script message", async
   assert.equal(response.conversationTokensUI.conversationId, CONV_A);
   assert.equal(response.conversationTokensUI.conversationTokens, 3);
   assert.equal(response.conversationTokensUI.dailyTotal, 3);
+  assert.equal(response.conversationTokensUI.dailyDate, getLocalDayKey());
   assert.equal(harness.getStorage(CONVERSATION_TOKENS_UI_KEY).conversationTokens, 3);
+});
+
+test("background stamps daily token UI state with a local day key", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/background.js"), "utf8");
+
+  assert.match(source, /dailyDate:\s*today/);
+  assert.match(source, /function getDailyTokenDayKey\(\)\s*{\s*return getDayKey\(Date\.now\(\)\);/);
+  assert.doesNotMatch(source, /toISOString\(\)\.slice\(0,\s*10\)/);
+});
+
+test("background uses tokenizer count API instead of allocating encoded token arrays", async () => {
+  let encodeCalls = 0;
+  const countedTexts = [];
+  const harness = createBackgroundHarness(async () => conversationResponse([
+    "alpha beta",
+    "gamma"
+  ]), {
+    tokenizer() {
+      encodeCalls += 1;
+      throw new Error("encode fallback should not be used");
+    },
+    tokenCounter(text) {
+      countedTexts.push(text);
+      return wordTokenizer(text).length;
+    }
+  });
+
+  const uiState = await harness.hooks.updateConversationAndDailyTokens(ORG_A, CONV_A);
+
+  assert.equal(uiState.conversationTokens, 3);
+  assert.equal(encodeCalls, 0);
+  assert.deepEqual(countedTexts, [
+    "alpha beta\ngamma\n"
+  ]);
 });
 
 test("background stores known usage response fields per organization", async () => {
@@ -370,7 +414,9 @@ test("content no longer wires local fake chat or token counters into the meter",
   assert.doesNotMatch(source, /tokensToday/);
   assert.doesNotMatch(source, /tokensApproximate/);
   assert.match(source, /\bconversationTokens,\n/);
-  assert.match(source, /dailyTotalTokens:\s*dailyTotal/);
+  assert.match(source, /dailyTotalTokens:\s*getCurrentDailyTotal\(convUI\)/);
+  assert.match(source, /dailyDate:\s*normalizeDayKey\(value\.dailyDate\)/);
+  assert.match(source, /function getCurrentDailyTotal/);
   assert.match(source, /formatTokenLine/);
 });
 

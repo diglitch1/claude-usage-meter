@@ -22,8 +22,8 @@ access to Claude's same-origin internal API.
 - Every 15 seconds at most, it asks the background script to refresh token counts
   for the current conversation.
 - The background script fetches Claude's conversation JSON, extracts message text,
-  tokenizes it locally with the vendored `gpt-tokenizer` `o200k_base` encoding,
-  and stores the result in `browser.storage.local`.
+  counts it locally with the vendored `gpt-tokenizer` `o200k_base` encoding, and
+  stores the result in `browser.storage.local`.
 - Daily totals are accumulated from positive per-conversation token deltas.
 
 No completion stream interception is used. The failed `webRequest` and injected
