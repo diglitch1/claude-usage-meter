@@ -16,6 +16,7 @@
   const CONV_FETCH_INTERVAL_MS = 15000;
   const STORAGE_PULL_MS = 90000;
   const USAGE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+  const COMPACT_LAYOUT_MAX_WIDTH = 820;
 
   const ICONS = {
     message:
@@ -90,7 +91,8 @@
   if (contentTestMode) {
     globalThis.__CUM_CONTENT_TEST_HOOKS__ = {
       isComposerLikeBox,
-      reconcileBarElement
+      reconcileBarElement,
+      shouldPlaceBarBeforeComposer
     };
   } else {
     init();
@@ -706,7 +708,7 @@
       return;
     }
 
-    injectBarAfterComposer(composer, Boolean(options.forceComposerScan));
+    injectBarBesideComposer(composer, Boolean(options.forceComposerScan));
     renderBar(usageState);
   }
 
@@ -882,7 +884,7 @@
     }
   }
 
-  function injectBarAfterComposer(composer, syncLayout = false) {
+  function injectBarBesideComposer(composer, syncLayout = false) {
     if (!composer || !composer.parentNode) {
       return;
     }
@@ -902,14 +904,28 @@
     // not accumulate click handlers from multiple script instances.
     bar.onclick = () => window.location.assign(SETTINGS_URL);
 
-    if (composer.nextSibling !== bar) {
-      composer.parentNode.insertBefore(bar, composer.nextSibling);
+    const placeBeforeComposer = shouldPlaceBarBeforeComposer();
+    const isInResponsivePosition = placeBeforeComposer
+      ? composer.previousSibling === bar
+      : composer.nextSibling === bar;
+
+    if (!isInResponsivePosition) {
+      composer.parentNode.insertBefore(
+        bar,
+        placeBeforeComposer ? composer : composer.nextSibling
+      );
       didInsert = true;
     }
 
     if (syncLayout || didInsert) {
       syncBarLayoutWithComposer(composer);
     }
+  }
+
+  function shouldPlaceBarBeforeComposer() {
+    const viewportWidth =
+      window.innerWidth || document.documentElement.clientWidth || Number.POSITIVE_INFINITY;
+    return viewportWidth <= COMPACT_LAYOUT_MAX_WIDTH;
   }
 
   function reconcileBarElement() {

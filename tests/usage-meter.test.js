@@ -159,11 +159,12 @@ function createBackgroundHarness(fetchImpl, options = {}) {
   };
 }
 
-function createContentLifecycleHarness() {
+function createContentLifecycleHarness(options = {}) {
   const mountedBars = [];
   const document = {
     documentElement: {
-      clientHeight: 800
+      clientHeight: 800,
+      clientWidth: options.viewportWidth || 1200
     },
     querySelectorAll(selector) {
       assert.equal(selector, '[id="claude-usage-meter-root"]');
@@ -176,6 +177,7 @@ function createContentLifecycleHarness() {
     document,
     window: {
       innerHeight: 800,
+      innerWidth: options.viewportWidth || 1200,
       location: {
         pathname: "/chat/11111111-1111-4111-8111-111111111111"
       }
@@ -513,4 +515,12 @@ test("composer detection accepts a composer expanded by a long prompt", () => {
     top: -150,
     bottom: 750
   }), true);
+});
+
+test("content script places the meter above Claude's composer in compact layouts", () => {
+  const compactHarness = createContentLifecycleHarness({ viewportWidth: 683 });
+  const wideHarness = createContentLifecycleHarness({ viewportWidth: 1200 });
+
+  assert.equal(compactHarness.hooks.shouldPlaceBarBeforeComposer(), true);
+  assert.equal(wideHarness.hooks.shouldPlaceBarBeforeComposer(), false);
 });
