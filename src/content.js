@@ -84,7 +84,17 @@
   let lastConvTokenFetchTime = 0;
   let lastConvTokenFetchId = null;
 
-  init();
+  const contentTestMode =
+    typeof globalThis !== "undefined" && Boolean(globalThis.__CUM_CONTENT_TEST__);
+
+  if (contentTestMode) {
+    globalThis.__CUM_CONTENT_TEST_HOOKS__ = {
+      isComposerLikeBox,
+      reconcileBarElement
+    };
+  } else {
+    init();
+  }
 
   async function init() {
     state = await loadState();
@@ -827,7 +837,7 @@
   }
 
   function renderBar(usageState) {
-    if (!bar) {
+    if (!bar || !bar.isConnected) {
       return;
     }
 
@@ -873,16 +883,24 @@
   }
 
   function injectBarAfterComposer(composer, syncLayout = false) {
+    if (!composer || !composer.parentNode) {
+      return;
+    }
+
     let didInsert = false;
+    reconcileBarElement();
 
     if (!bar) {
       bar = document.createElement("button");
       bar.id = ROOT_ID;
       bar.type = "button";
       bar.className = "claude-usage-meter";
-      bar.addEventListener("click", () => window.location.assign(SETTINGS_URL));
       didInsert = true;
     }
+
+    // Assignment is intentional: a bar adopted after a content-script reload must
+    // not accumulate click handlers from multiple script instances.
+    bar.onclick = () => window.location.assign(SETTINGS_URL);
 
     if (composer.nextSibling !== bar) {
       composer.parentNode.insertBefore(bar, composer.nextSibling);
@@ -892,6 +910,24 @@
     if (syncLayout || didInsert) {
       syncBarLayoutWithComposer(composer);
     }
+  }
+
+  function reconcileBarElement() {
+    const mountedBars = Array.from(
+      document.querySelectorAll(`[id="${ROOT_ID}"]`)
+    );
+    const connectedCurrent =
+      bar && bar.isConnected && mountedBars.includes(bar) ? bar : null;
+    const canonicalBar = connectedCurrent || mountedBars[0] || null;
+
+    mountedBars.forEach((mountedBar) => {
+      if (mountedBar !== canonicalBar) {
+        mountedBar.remove();
+      }
+    });
+
+    bar = canonicalBar;
+    return bar;
   }
 
   function syncBarLayoutWithComposer(composer) {
@@ -905,14 +941,15 @@
   }
 
   function removeBar() {
-    if (bar && bar.parentNode) {
-      bar.parentNode.removeChild(bar);
-    }
+    Array.from(document.querySelectorAll(`[id="${ROOT_ID}"]`)).forEach((mountedBar) => {
+      mountedBar.remove();
+    });
+    bar = null;
     lastRenderedHtml = "";
   }
 
   function findComposerContainer(force = false) {
-    if (!force && cachedComposer && cachedComposer.isConnected) {
+    if (!force && isUsableComposer(cachedComposer)) {
       return cachedComposer;
     }
 
@@ -933,6 +970,14 @@
 
     cachedComposer = null;
     return null;
+  }
+
+  function isUsableComposer(composer) {
+    if (!composer || !composer.isConnected || !composer.parentNode || !composer.querySelector) {
+      return false;
+    }
+
+    return Boolean(composer.querySelector("textarea,[contenteditable='true']"));
   }
 
   function findComposerAncestor(node) {
@@ -964,7 +1009,6 @@
       hasButton &&
       rect.width >= 300 &&
       rect.height >= 56 &&
-      rect.height <= 360 &&
       rect.bottom > viewportHeight * 0.35 &&
       rect.top < viewportHeight
     );

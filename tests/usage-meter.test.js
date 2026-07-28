@@ -159,6 +159,51 @@ function createBackgroundHarness(fetchImpl, options = {}) {
   };
 }
 
+function createContentLifecycleHarness() {
+  const mountedBars = [];
+  const document = {
+    documentElement: {
+      clientHeight: 800
+    },
+    querySelectorAll(selector) {
+      assert.equal(selector, '[id="claude-usage-meter-root"]');
+      return mountedBars.filter((element) => element.isConnected);
+    }
+  };
+  const context = {
+    __CUM_CONTENT_TEST__: true,
+    console,
+    document,
+    window: {
+      innerHeight: 800,
+      location: {
+        pathname: "/chat/11111111-1111-4111-8111-111111111111"
+      }
+    }
+  };
+
+  vm.runInNewContext(
+    fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8"),
+    context,
+    { filename: "src/content.js" }
+  );
+
+  return {
+    addBar(name) {
+      const element = {
+        isConnected: true,
+        name,
+        remove() {
+          this.isConnected = false;
+        }
+      };
+      mountedBars.push(element);
+      return element;
+    },
+    hooks: context.__CUM_CONTENT_TEST_HOOKS__
+  };
+}
+
 function getLocalDayKey(timestamp = Date.now()) {
   const date = new Date(timestamp);
   const year = date.getFullYear();
@@ -431,4 +476,41 @@ test("content script avoids hot observers and push-style storage updates", () =>
   assert.doesNotMatch(source, /XMLHttpRequest/);
   assert.match(source, /STORAGE_PULL_MS\s*=\s*90000/);
   assert.match(source, /DOM_POLL_MS\s*=\s*3000/);
+});
+
+test("content script adopts one canonical meter and removes duplicate instances", () => {
+  const harness = createContentLifecycleHarness();
+  const first = harness.addBar("first");
+  const duplicate = harness.addBar("duplicate");
+
+  assert.equal(harness.hooks.reconcileBarElement(), first);
+  assert.equal(first.isConnected, true);
+  assert.equal(duplicate.isConnected, false);
+
+  first.isConnected = false;
+  const replacement = harness.addBar("replacement");
+  assert.equal(harness.hooks.reconcileBarElement(), replacement);
+  assert.equal(replacement.isConnected, true);
+});
+
+test("composer detection accepts a composer expanded by a long prompt", () => {
+  const harness = createContentLifecycleHarness();
+  const expandedComposer = {
+    querySelector(selector) {
+      if (selector === "textarea,[contenteditable='true']") {
+        return {};
+      }
+      if (selector === "button,[role='button']") {
+        return {};
+      }
+      return null;
+    }
+  };
+
+  assert.equal(harness.hooks.isComposerLikeBox(expandedComposer, {
+    width: 640,
+    height: 900,
+    top: -150,
+    bottom: 750
+  }), true);
 });
