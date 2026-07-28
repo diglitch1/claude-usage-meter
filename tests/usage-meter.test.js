@@ -526,7 +526,9 @@ test("content script selects a bottom-docked meter layout for compact viewports"
 
   const contentSource = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
   const stylesSource = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
-  assert.match(contentSource, /composer\.nextSibling !== bar/);
+  assert.match(contentSource, /targetParent\.appendChild\(bar\)/);
+  assert.match(contentSource, /document\.body \? document\.body : composer\.parentNode/);
   assert.match(stylesSource, /data-cum-meter-compact-host/);
+  assert.match(stylesSource, /translate:\s*0 calc\(0px - var\(--cum-meter-reserve/);
   assert.match(stylesSource, /@media \(max-width: 820px\)[\s\S]*position: fixed/);
 });

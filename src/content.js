@@ -906,8 +906,18 @@
     // not accumulate click handlers from multiple script instances.
     bar.onclick = () => window.location.assign(SETTINGS_URL);
 
-    if (composer.nextSibling !== bar) {
-      composer.parentNode.insertBefore(bar, composer.nextSibling);
+    const compact = isCompactLayout();
+    const targetParent = compact && document.body ? document.body : composer.parentNode;
+    const isInResponsivePosition = compact
+      ? bar.parentNode === targetParent
+      : composer.nextSibling === bar;
+
+    if (!isInResponsivePosition) {
+      if (compact) {
+        targetParent.appendChild(bar);
+      } else {
+        composer.parentNode.insertBefore(bar, composer.nextSibling);
+      }
       didInsert = true;
     }
 
@@ -950,7 +960,7 @@
     bar.dataset.layout = compact ? "compact" : "wide";
 
     if (compact) {
-      reserveCompactMeterSpace(composer, computed);
+      reserveCompactMeterSpace(composer);
       bar.style.left = `${Math.round(rect.left)}px`;
       bar.style.marginLeft = "0px";
       bar.style.marginRight = "0px";
@@ -963,17 +973,13 @@
     bar.style.marginRight = computed.marginRight;
   }
 
-  function reserveCompactMeterSpace(composer, computed) {
+  function reserveCompactMeterSpace(composer) {
     if (compactComposer && compactComposer !== composer) {
       releaseCompactMeterSpace();
     }
 
     compactComposer = composer;
     if (!composer.hasAttribute("data-cum-meter-compact-host")) {
-      const originalMargin = /^\d+(?:\.\d+)?px$/.test(computed.marginBottom)
-        ? computed.marginBottom
-        : "0px";
-      composer.style.setProperty("--cum-original-margin-bottom", originalMargin);
       composer.style.setProperty("--cum-meter-reserve", `${COMPACT_METER_RESERVE_PX}px`);
       composer.setAttribute("data-cum-meter-compact-host", "true");
     }
@@ -985,7 +991,6 @@
     }
 
     compactComposer.removeAttribute("data-cum-meter-compact-host");
-    compactComposer.style.removeProperty("--cum-original-margin-bottom");
     compactComposer.style.removeProperty("--cum-meter-reserve");
     compactComposer = null;
   }

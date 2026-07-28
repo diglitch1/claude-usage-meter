@@ -156,9 +156,7 @@
 }
 
 [data-cum-meter-compact-host="true"] {
-  margin-bottom: calc(
-    var(--cum-original-margin-bottom, 0px) + var(--cum-meter-reserve, 52px)
-  ) !important;
+  translate: 0 calc(0px - var(--cum-meter-reserve, 52px));
 }
 
 #claude-usage-meter-root .cum-open {
