@@ -10,7 +10,7 @@ the message composer on `claude.ai`.
 It shows:
 
 - Current 5-hour/session usage percentage and reset timing.
-- Current conversation token count and daily token total as `conversation • daily`.
+- Estimated current-conversation token count, clearly marked with `~`.
 - Click-through to `https://claude.ai/settings/usage`.
 
 ## How It Works
@@ -19,12 +19,11 @@ The extension runs a content script on `claude.ai` and a background script with
 access to Claude's same-origin internal API.
 
 - The content script detects the current organization and conversation ID.
-- Every 15 seconds at most, it asks the background script to refresh token counts
-  for the current conversation.
+- Every 15 seconds at most, it asks the background script to refresh the estimated
+  token count for the current conversation.
 - The background script fetches Claude's conversation JSON, extracts message text,
   counts it locally with the vendored `gpt-tokenizer` `o200k_base` encoding, and
   stores the result in `browser.storage.local`.
-- Daily totals are accumulated from positive per-conversation token deltas.
 
 No completion stream interception is used. The failed `webRequest` and injected
 `fetch` interception paths have been removed.
@@ -48,8 +47,10 @@ reads Claude's usage endpoint in the background, falls back to visible text on
 If the meter says `open usage to sync`, click it once, let Claude's usage page
 load, then return to chat.
 
-Token counts are estimates. They use `gpt-tokenizer`'s `o200k_base` encoding as a
-local approximation because Claude's exact tokenizer is not exposed in the page.
+Conversation token counts are estimates. They use `gpt-tokenizer`'s `o200k_base`
+encoding as a local approximation because Claude's exact tokenizer is not exposed
+in the page. The extension intentionally does not present an account-wide daily
+token total because Claude does not expose a reliable value for it.
 
 ## Development
 

@@ -1,7 +1,6 @@
 (function () {
   const STORAGE_KEY = "claudeUsageMeterStateV2";
   const CONV_TOKENS_KEY = "conversationTokens";
-  const DAILY_TOKENS_KEY = "dailyTokens";
   const CONVERSATION_TOKENS_UI_KEY = "conversationTokensUI";
   const ALARM_NAME = "refresh-usage";
   const NORMAL_PERIOD_MINUTES = 1.5;
@@ -97,7 +96,7 @@
     }
 
     if (message.type === MESSAGE_UPDATE_CONV_TOKENS) {
-      return updateConversationAndDailyTokens(message.orgId, message.conversationId).then((uiState) => ({
+      return updateConversationTokens(message.orgId, message.conversationId).then((uiState) => ({
         ok: Boolean(uiState),
         conversationTokensUI: uiState
       }));
@@ -459,7 +458,7 @@
     }
   }
 
-  async function updateConversationAndDailyTokens(orgId, conversationId) {
+  async function updateConversationTokens(orgId, conversationId) {
     const normalizedConversationId = normalizeConversationId(conversationId);
     if (!normalizeOrgId(orgId) || !normalizedConversationId) {
       return null;
@@ -470,43 +469,21 @@
       return null;
     }
 
-    const today = getDailyTokenDayKey();
-    const stored = await storageGet([CONV_TOKENS_KEY, DAILY_TOKENS_KEY]);
+    const stored = await storageGet([CONV_TOKENS_KEY]);
     const convState = stored && stored[CONV_TOKENS_KEY] && typeof stored[CONV_TOKENS_KEY] === "object"
       ? stored[CONV_TOKENS_KEY]
       : {};
-    let dailyState = stored && stored[DAILY_TOKENS_KEY] && typeof stored[DAILY_TOKENS_KEY] === "object"
-      ? stored[DAILY_TOKENS_KEY]
-      : {};
-
-    if (dailyState.date !== today) {
-      dailyState = { date: today, total: 0, seen: {} };
-    }
-    if (!dailyState.seen || typeof dailyState.seen !== "object") {
-      dailyState.seen = {};
-    }
-
-    const previousConversationCount = Number(convState[normalizedConversationId]);
-    const previousCount = Number.isFinite(previousConversationCount)
-      ? previousConversationCount
-      : 0;
-    const delta = Math.max(0, tokenCount - previousCount);
 
     convState[normalizedConversationId] = tokenCount;
-    dailyState.seen[normalizedConversationId] = tokenCount;
-    dailyState.total = (Number.isFinite(Number(dailyState.total)) ? Number(dailyState.total) : 0) + delta;
 
     const uiState = {
       conversationId: normalizedConversationId,
       conversationTokens: tokenCount,
-      dailyTotal: dailyState.total,
-      dailyDate: today,
       updatedAt: Date.now()
     };
 
     await storageSet({
       [CONV_TOKENS_KEY]: convState,
-      [DAILY_TOKENS_KEY]: dailyState,
       [CONVERSATION_TOKENS_UI_KEY]: uiState
     });
 
@@ -633,7 +610,7 @@
 
     return {
       windowLabel: "5h",
-      plan: previousUsage.plan || "",
+      plan: extractPlanFromUsageResponse(data) || normalizePlanName(previousUsage.plan),
       usagePercent,
       resetText,
       resetAt,
@@ -652,6 +629,57 @@
         ? extraUsage.currency
         : null
     };
+  }
+
+  function extractPlanFromUsageResponse(data) {
+    const candidates = [
+      data.plan,
+      data.plan_type,
+      data.subscription_type,
+      data.subscription && data.subscription.plan,
+      data.organization && data.organization.plan,
+      data.account && data.account.plan
+    ];
+
+    for (const candidate of candidates) {
+      const plan = normalizePlanName(candidate);
+      if (plan) {
+        return plan;
+      }
+    }
+
+    return "";
+  }
+
+  function normalizePlanName(value) {
+    const text = String(value || "")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text) {
+      return "";
+    }
+
+    const maxMatch = text.match(/\bmax(?:\s+plan)?(?:\s+(5x|20x))?\b/i);
+    if (maxMatch) {
+      return maxMatch[1] ? `Max ${maxMatch[1].toLowerCase()}` : "Max";
+    }
+    if (/\benterprise\b/i.test(text)) {
+      return "Enterprise";
+    }
+    if (/\beducation\b|\bedu\b/i.test(text)) {
+      return "Education";
+    }
+    if (/\bteam\b/i.test(text)) {
+      return "Team";
+    }
+    if (/\bpro\b/i.test(text)) {
+      return "Pro";
+    }
+    if (/\bfree\b/i.test(text)) {
+      return "Free";
+    }
+    return "";
   }
 
   function normalizeOrgId(value) {
@@ -737,10 +765,6 @@
     return `${year}-${month}-${day}`;
   }
 
-  function getDailyTokenDayKey() {
-    return getDayKey(Date.now());
-  }
-
   function getErrorMessage(error) {
     return error && error.message ? error.message : String(error || "unknown-error");
   }
@@ -780,9 +804,10 @@
   if (typeof globalThis !== "undefined" && globalThis.__CUM_TEST__) {
     globalThis.__CUM_TEST_HOOKS__ = {
       fetchConversationTokens,
-      updateConversationAndDailyTokens,
+      updateConversationTokens,
       extractConversationText,
       countConversationTokens,
+      normalizePlanName,
       normalizeConversationId,
       CONV_FETCH_INTERVAL_MS,
       CONTEXT_LIMIT

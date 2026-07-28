@@ -20,8 +20,6 @@
   const COMPACT_METER_RESERVE_PX = 52;
 
   const ICONS = {
-    message:
-      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/><path d="M8 9h8M8 13h5"/></svg>',
     token:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>',
     external:
@@ -94,7 +92,10 @@
     globalThis.__CUM_CONTENT_TEST_HOOKS__ = {
       isComposerLikeBox,
       reconcileBarElement,
-      isCompactLayout
+      isCompactLayout,
+      normalizePlanName,
+      pickPlan,
+      formatEstimatedTokenCount
     };
   } else {
     init();
@@ -166,7 +167,7 @@
     output.usage = Object.assign(base.usage, legacyUsage, {
       usagePercent: coercePercent(legacyUsage.usagePercent ?? legacyUsage.sessionPercent),
       resetText: legacyUsage.resetText || legacyUsage.sessionReset || "",
-      plan: legacyUsage.plan || "",
+      plan: normalizePlanName(legacyUsage.plan),
       resetAt: Number.isFinite(legacyUsage.resetAt) ? legacyUsage.resetAt : null
     });
     output.usageByOrg = input && input.usageByOrg && typeof input.usageByOrg === "object"
@@ -214,7 +215,7 @@
 
     const beforeVersion = getUsageVersion(state);
     const beforeOrgId = state.organizationId || "";
-    const beforeTokenText = getCurrentTokenLine();
+    const beforeTokenText = getCurrentTokenEstimateText();
     if (stored) {
       mergeStoredUsageState(stored);
     }
@@ -222,7 +223,7 @@
     if (
       beforeVersion !== getUsageVersion(state) ||
       beforeOrgId !== (state.organizationId || "") ||
-      beforeTokenText !== getCurrentTokenLine()
+      beforeTokenText !== getCurrentTokenEstimateText()
     ) {
       scheduleUpdate({});
     }
@@ -365,9 +366,9 @@
       .then((response) => {
         const incoming = normalizeConversationTokensUI(response && response.conversationTokensUI);
         if (incoming) {
-          const beforeTokenText = getCurrentTokenLine();
+          const beforeTokenText = getCurrentTokenEstimateText();
           state.conversationTokensUI = incoming;
-          if (beforeTokenText !== getCurrentTokenLine()) {
+          if (beforeTokenText !== getCurrentTokenEstimateText()) {
             scheduleUpdate({});
           }
         }
@@ -729,13 +730,10 @@
 
     return {
       windowLabel: usageData ? usageData.windowLabel : "5h",
-      plan: usageData ? usageData.plan : "Pro",
+      plan: usageData ? usageData.plan : "",
       usagePercent: usageData ? usageData.usagePercent : null,
       resetText: usageData ? usageData.resetText : "open usage to sync",
-      chatMessages: null,
-      todayMessages: null,
-      conversationTokens,
-      dailyTotalTokens: getCurrentDailyTotal(convUI)
+      conversationTokens
     };
   }
 
@@ -761,7 +759,7 @@
 
     return {
       windowLabel: usage.windowLabel || "5h",
-      plan: usage.plan,
+      plan: normalizePlanName(usage.plan),
       usagePercent: usage.usagePercent,
       resetText,
       source: usage.source || "settings-cache"
@@ -849,10 +847,20 @@
     const tone = getUsageTone(percent);
     const percentText = Number.isFinite(percent) ? `${percent}%` : "--";
     const progress = Number.isFinite(percent) ? `${percent}%` : "0%";
-    const messageText = `${formatCountOrUnknown(usageState.chatMessages)} • ${formatCountOrUnknown(usageState.todayMessages)}`;
-    const tokenText = formatTokenLine(usageState.conversationTokens, usageState.dailyTotalTokens);
+    const planBadge = usageState.plan
+      ? `<span class="cum-plan-badge">${escapeHtml(usageState.plan)}</span>`
+      : "";
+    const tokenText = formatEstimatedTokenCount(usageState.conversationTokens);
+    const tokenSection = tokenText
+      ? `
+        <span class="cum-section cum-tokens" title="Estimated conversation tokens; Claude's tokenizer is not publicly available">
+          <span class="cum-icon">${ICONS.token}</span>
+          <span>${escapeHtml(tokenText)}</span>
+        </span>`
+      : "";
 
     bar.dataset.usageTone = tone;
+    bar.dataset.hasTokens = tokenText ? "true" : "false";
     bar.style.setProperty("--cum-progress", progress);
     bar.setAttribute("aria-label", "Open Claude usage settings");
 
@@ -860,21 +868,14 @@
       <span class="cum-section cum-window">
         <span class="cum-status-dot"></span>
         <span class="cum-window-label">${escapeHtml(usageState.windowLabel)}</span>
-        <span class="cum-plan-badge">${escapeHtml(usageState.plan || "Pro")}</span>
+        ${planBadge}
       </span>
       <span class="cum-section cum-usage">
         <span class="cum-percent">${percentText}</span>
         <span class="cum-progress-track"><span class="cum-progress-fill"></span></span>
       </span>
       <span class="cum-section cum-reset">${escapeHtml(usageState.resetText || "open usage to sync")}</span>
-      <span class="cum-section cum-messages">
-        <span class="cum-icon">${ICONS.message}</span>
-        <span>${messageText}</span>
-      </span>
-      <span class="cum-section cum-tokens">
-        <span class="cum-icon">${ICONS.token}</span>
-        <span>${escapeHtml(tokenText)}</span>
-      </span>
+      ${tokenSection}
       <span class="cum-section cum-open">
         <span class="cum-icon">${ICONS.external}</span>
       </span>
@@ -1111,8 +1112,51 @@
   }
 
   function pickPlan(text) {
-    const match = text.match(/Plan usage limits\s+([A-Za-z][\w -]{1,24})/i);
-    return match ? match[1].trim() : "";
+    const patterns = [
+      /Plan usage limits\s+([^\n]+)/i,
+      /(?:Current|Subscription) plan\s*:?\s*([^\n]+)/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = String(text || "").match(pattern);
+      const plan = normalizePlanName(match && match[1]);
+      if (plan) {
+        return plan;
+      }
+    }
+
+    return "";
+  }
+
+  function normalizePlanName(value) {
+    const text = String(value || "")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text) {
+      return "";
+    }
+
+    const maxMatch = text.match(/\bmax(?:\s+plan)?(?:\s+(5x|20x))?\b/i);
+    if (maxMatch) {
+      return maxMatch[1] ? `Max ${maxMatch[1].toLowerCase()}` : "Max";
+    }
+    if (/\benterprise\b/i.test(text)) {
+      return "Enterprise";
+    }
+    if (/\beducation\b|\bedu\b/i.test(text)) {
+      return "Education";
+    }
+    if (/\bteam\b/i.test(text)) {
+      return "Team";
+    }
+    if (/\bpro\b/i.test(text)) {
+      return "Pro";
+    }
+    if (/\bfree\b/i.test(text)) {
+      return "Free";
+    }
+    return "";
   }
 
   function pickPercent(text) {
@@ -1197,13 +1241,11 @@
     }
 
     const conversationTokens = Number(value.conversationTokens);
-    const dailyTotal = Number(value.dailyTotal);
     const updatedAt = Number(value.updatedAt);
     if (
       typeof value.conversationId !== "string" ||
       !value.conversationId ||
-      !Number.isFinite(conversationTokens) ||
-      !Number.isFinite(dailyTotal)
+      !Number.isFinite(conversationTokens)
     ) {
       return null;
     }
@@ -1211,52 +1253,23 @@
     return {
       conversationId: value.conversationId,
       conversationTokens: Math.max(0, Math.round(conversationTokens)),
-      dailyTotal: Math.max(0, Math.round(dailyTotal)),
-      dailyDate: normalizeDayKey(value.dailyDate),
       updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0
     };
   }
 
-  function normalizeDayKey(value) {
-    const text = String(value || "").trim();
-    return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
-  }
-
-  function getCurrentDailyTotal(convUI) {
-    if (!convUI) {
-      return null;
-    }
-    return convUI.dailyDate === getDayKey() ? convUI.dailyTotal : 0;
-  }
-
-  function getCurrentTokenLine() {
+  function getCurrentTokenEstimateText() {
     const convUI = normalizeConversationTokensUI(state.conversationTokensUI);
     const currentConvId = getConversationIdFromUrl();
     const conversationTokens = convUI && convUI.conversationId === currentConvId
       ? convUI.conversationTokens
       : null;
-    return formatTokenLine(conversationTokens, getCurrentDailyTotal(convUI));
+    return formatEstimatedTokenCount(conversationTokens);
   }
 
-  function formatTokenLine(conversationTokens, dailyTotal) {
-    return `${formatTokenCountOrUnknown(conversationTokens)} • ${formatTokenCountOrUnknown(dailyTotal)}`;
-  }
-
-  function formatTokenCountOrUnknown(value) {
-    return Number.isFinite(Number(value))
-      ? Math.max(0, Math.round(Number(value))).toLocaleString()
-      : "--";
-  }
-
-  function formatCount(value) {
-    return String(Math.max(0, Math.round(Number(value) || 0)));
-  }
-
-  function formatCountOrUnknown(value) {
-    if (value === null || value === undefined || value === "") {
-      return "--";
-    }
-    return Number.isFinite(Number(value)) ? formatCount(value) : "--";
+  function formatEstimatedTokenCount(value) {
+    return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value))
+      ? `~${Math.max(0, Math.round(Number(value))).toLocaleString()}`
+      : "";
   }
 
   function getDayKey(timestamp = Date.now()) {

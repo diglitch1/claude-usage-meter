@@ -7,7 +7,6 @@ const vm = require("node:vm");
 const ROOT = path.resolve(__dirname, "..");
 const STORAGE_KEY = "claudeUsageMeterStateV2";
 const CONV_TOKENS_KEY = "conversationTokens";
-const DAILY_TOKENS_KEY = "dailyTokens";
 const CONVERSATION_TOKENS_UI_KEY = "conversationTokensUI";
 const ORG_A = "org_account_AAAAAAAAAAAA";
 const ORG_B = "org_account_BBBBBBBBBBBB";
@@ -18,8 +17,9 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function makeUsageResponse({ utilization, resetsAt, sevenDay = 9, extra = 61.625 }) {
+function makeUsageResponse({ utilization, resetsAt, sevenDay = 9, extra = 61.625, planType }) {
   return {
+    plan_type: planType,
     five_hour: {
       utilization,
       resets_at: resetsAt
@@ -59,10 +59,6 @@ function conversationResponse(textBlocks) {
 
 function wordTokenizer(text) {
   return String(text || "").trim().split(/\s+/).filter(Boolean);
-}
-
-function tokenWords(count) {
-  return Array.from({ length: count }, (_, index) => `t${index}`).join(" ");
 }
 
 function createBackgroundHarness(fetchImpl, options = {}) {
@@ -206,15 +202,7 @@ function createContentLifecycleHarness(options = {}) {
   };
 }
 
-function getLocalDayKey(timestamp = Date.now()) {
-  const date = new Date(timestamp);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-test("updateConversationAndDailyTokens accumulates same-conversation deltas", async () => {
+test("updateConversationTokens refreshes the current conversation estimate", async () => {
   const bodies = [
     ["alpha beta gamma"],
     ["alpha beta gamma delta epsilon"]
@@ -225,54 +213,16 @@ test("updateConversationAndDailyTokens accumulates same-conversation deltas", as
     return conversationResponse(bodies[callIndex++]);
   });
 
-  const first = await harness.hooks.updateConversationAndDailyTokens(ORG_A, CONV_A);
+  const first = await harness.hooks.updateConversationTokens(ORG_A, CONV_A);
   assert.equal(first.conversationTokens, 3);
-  assert.equal(first.dailyTotal, 3);
 
-  const second = await harness.hooks.updateConversationAndDailyTokens(ORG_A, CONV_A);
+  const second = await harness.hooks.updateConversationTokens(ORG_A, CONV_A);
   assert.equal(second.conversationTokens, 5);
-  assert.equal(second.dailyTotal, 5);
   assert.equal(harness.getStorage(CONV_TOKENS_KEY)[CONV_A], 5);
-  assert.deepEqual(harness.getStorage(DAILY_TOKENS_KEY), {
-    date: getLocalDayKey(),
-    total: 5,
-    seen: {
-      [CONV_A]: 5
-    }
-  });
-  assert.equal(harness.getStorage(CONVERSATION_TOKENS_UI_KEY).dailyTotal, 5);
-  assert.equal(harness.getStorage(CONVERSATION_TOKENS_UI_KEY).dailyDate, getLocalDayKey());
+  assert.deepEqual(harness.getStorage(CONVERSATION_TOKENS_UI_KEY), clone(second));
 });
 
-test("daily conversation token accumulator rolls over when the date changes", async () => {
-  const harness = createBackgroundHarness(async () => conversationResponse([
-    tokenWords(104)
-  ]));
-  harness.setStorage(CONV_TOKENS_KEY, {
-    [CONV_A]: 99
-  });
-  harness.setStorage(DAILY_TOKENS_KEY, {
-    date: "2000-01-01",
-    total: 99,
-    seen: {
-      [CONV_A]: 99
-    }
-  });
-
-  const uiState = await harness.hooks.updateConversationAndDailyTokens(ORG_A, CONV_A);
-  assert.equal(uiState.conversationTokens, 104);
-  assert.equal(uiState.dailyTotal, 5);
-  assert.deepEqual(harness.getStorage(DAILY_TOKENS_KEY), {
-    date: getLocalDayKey(),
-    total: 5,
-    seen: {
-      [CONV_A]: 104
-    }
-  });
-  assert.equal(uiState.dailyDate, getLocalDayKey());
-});
-
-test("switching conversations calculates daily deltas independently", async () => {
+test("switching conversations stores estimates independently", async () => {
   const responses = {
     [CONV_A]: [
       ["a b"],
@@ -291,18 +241,13 @@ test("switching conversations calculates daily deltas independently", async () =
     return conversationResponse(responses[conversationId][calls[conversationId]++]);
   });
 
-  await harness.hooks.updateConversationAndDailyTokens(ORG_A, CONV_A);
-  await harness.hooks.updateConversationAndDailyTokens(ORG_A, CONV_B);
-  const uiState = await harness.hooks.updateConversationAndDailyTokens(ORG_A, CONV_A);
+  await harness.hooks.updateConversationTokens(ORG_A, CONV_A);
+  await harness.hooks.updateConversationTokens(ORG_A, CONV_B);
+  const uiState = await harness.hooks.updateConversationTokens(ORG_A, CONV_A);
 
   assert.equal(uiState.conversationId, CONV_A);
   assert.equal(uiState.conversationTokens, 4);
-  assert.equal(uiState.dailyTotal, 7);
   assert.deepEqual(harness.getStorage(CONV_TOKENS_KEY), {
-    [CONV_A]: 4,
-    [CONV_B]: 3
-  });
-  assert.deepEqual(harness.getStorage(DAILY_TOKENS_KEY).seen, {
     [CONV_A]: 4,
     [CONV_B]: 3
   });
@@ -322,17 +267,7 @@ test("background updates conversation tokens from content script message", async
   assert.equal(response.ok, true);
   assert.equal(response.conversationTokensUI.conversationId, CONV_A);
   assert.equal(response.conversationTokensUI.conversationTokens, 3);
-  assert.equal(response.conversationTokensUI.dailyTotal, 3);
-  assert.equal(response.conversationTokensUI.dailyDate, getLocalDayKey());
   assert.equal(harness.getStorage(CONVERSATION_TOKENS_UI_KEY).conversationTokens, 3);
-});
-
-test("background stamps daily token UI state with a local day key", () => {
-  const source = fs.readFileSync(path.join(ROOT, "src/background.js"), "utf8");
-
-  assert.match(source, /dailyDate:\s*today/);
-  assert.match(source, /function getDailyTokenDayKey\(\)\s*{\s*return getDayKey\(Date\.now\(\)\);/);
-  assert.doesNotMatch(source, /toISOString\(\)\.slice\(0,\s*10\)/);
 });
 
 test("background uses tokenizer count API instead of allocating encoded token arrays", async () => {
@@ -352,7 +287,7 @@ test("background uses tokenizer count API instead of allocating encoded token ar
     }
   });
 
-  const uiState = await harness.hooks.updateConversationAndDailyTokens(ORG_A, CONV_A);
+  const uiState = await harness.hooks.updateConversationTokens(ORG_A, CONV_A);
 
   assert.equal(uiState.conversationTokens, 3);
   assert.equal(encodeCalls, 0);
@@ -365,13 +300,15 @@ test("background stores known usage response fields per organization", async () 
   const responses = {
     [ORG_A]: makeUsageResponse({
       utilization: 91,
-      resetsAt: "2026-05-14T18:30:01.095671+00:00"
+      resetsAt: "2026-05-14T18:30:01.095671+00:00",
+      planType: "pro"
     }),
     [ORG_B]: makeUsageResponse({
       utilization: 12,
       resetsAt: "2026-05-14T20:00:00.000000+00:00",
       sevenDay: 4,
-      extra: 25
+      extra: 25,
+      planType: "max_20x"
     })
   };
   const harness = createBackgroundHarness(async (url) => {
@@ -398,6 +335,7 @@ test("background stores known usage response fields per organization", async () 
   assert.equal(state.usage.extraUsageUsedCredits, 493);
   assert.equal(state.usage.extraUsageMonthlyLimit, 800);
   assert.equal(state.usage.extraUsageCurrency, "EUR");
+  assert.equal(state.usage.plan, "Pro");
   assert.equal(state.usageByOrg[ORG_A].usagePercent, 91);
 
   await harness.send({ type: "CUM_ORG_ID_DETECTED", orgId: ORG_B });
@@ -411,6 +349,7 @@ test("background stores known usage response fields per organization", async () 
   state = harness.getState();
   assert.equal(state.organizationId, ORG_B);
   assert.equal(state.usage.usagePercent, 12);
+  assert.equal(state.usage.plan, "Max 20x");
   assert.equal(state.usageByOrg[ORG_A].usagePercent, 91);
   assert.equal(state.usageByOrg[ORG_B].usagePercent, 12);
 
@@ -449,22 +388,45 @@ test("background clears old active usage when a 200 response cannot be parsed", 
   assert.equal(state.usageFetch.stale, true);
 });
 
-test("content no longer wires local fake chat or token counters into the meter", () => {
+test("content shows only an explicitly marked conversation token estimate", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+  const backgroundSource = fs.readFileSync(path.join(ROOT, "src/background.js"), "utf8");
 
   assert.doesNotMatch(source, /installSendListeners/);
   assert.doesNotMatch(source, /recordSentMessage/);
   assert.doesNotMatch(source, /estimateTokens/);
   assert.doesNotMatch(source, /updateChatCountFromVisibleMessages/);
-  assert.match(source, /chatMessages:\s*null/);
-  assert.match(source, /todayMessages:\s*null/);
-  assert.doesNotMatch(source, /tokensToday/);
-  assert.doesNotMatch(source, /tokensApproximate/);
-  assert.match(source, /\bconversationTokens,\n/);
-  assert.match(source, /dailyTotalTokens:\s*getCurrentDailyTotal\(convUI\)/);
-  assert.match(source, /dailyDate:\s*normalizeDayKey\(value\.dailyDate\)/);
-  assert.match(source, /function getCurrentDailyTotal/);
-  assert.match(source, /formatTokenLine/);
+  assert.doesNotMatch(source, /chatMessages/);
+  assert.doesNotMatch(source, /todayMessages/);
+  assert.doesNotMatch(source, /dailyTotal/);
+  assert.doesNotMatch(backgroundSource, /dailyTokens/);
+  assert.match(source, /\bconversationTokens\n/);
+  assert.match(source, /formatEstimatedTokenCount/);
+  assert.match(source, /Estimated conversation tokens/);
+});
+
+test("plan labels are normalized and never guessed", () => {
+  const harness = createContentLifecycleHarness();
+  const normalize = harness.hooks.normalizePlanName;
+
+  assert.equal(normalize("free"), "Free");
+  assert.equal(normalize("PRO"), "Pro");
+  assert.equal(normalize("claude_max_5x"), "Max 5x");
+  assert.equal(normalize("max-20x"), "Max 20x");
+  assert.equal(normalize("team_premium"), "Team");
+  assert.equal(normalize("enterprise"), "Enterprise");
+  assert.equal(normalize("education plan"), "Education");
+  assert.equal(normalize("unknown paid account"), "");
+  assert.equal(
+    harness.hooks.pickPlan("Settings\nPlan usage limits Free\nCurrent session\n8%"),
+    "Free"
+  );
+  assert.equal(harness.hooks.formatEstimatedTokenCount(null), "");
+  assert.match(harness.hooks.formatEstimatedTokenCount(44252), /^~44[,.]252$/);
+
+  const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+  assert.doesNotMatch(source, /usageData \? usageData\.plan : "Pro"/);
+  assert.doesNotMatch(source, /usageState\.plan \|\| "Pro"/);
 });
 
 test("content script avoids hot observers and push-style storage updates", () => {

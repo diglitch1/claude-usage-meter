@@ -21,7 +21,7 @@
   cursor: pointer;
   display: grid;
   font: 500 12.5px/1.15 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  grid-template-columns: max-content minmax(132px, 1fr) minmax(96px, max-content) max-content minmax(112px, max-content) 30px;
+  grid-template-columns: max-content minmax(132px, 1fr) minmax(96px, max-content) 30px;
   letter-spacing: 0;
   margin-bottom: 12px;
   margin-top: 8px;
@@ -32,6 +32,10 @@
   text-align: left;
   bottom: 8px;
   z-index: 30;
+}
+
+#claude-usage-meter-root[data-has-tokens="true"] {
+  grid-template-columns: max-content minmax(132px, 1fr) minmax(96px, max-content) minmax(112px, max-content) 30px;
 }
 
 #claude-usage-meter-root[data-usage-tone="low"] {
@@ -131,12 +135,6 @@
   font-weight: 500;
 }
 
-#claude-usage-meter-root .cum-messages {
-  color: rgb(222, 220, 214);
-  font-variant-numeric: tabular-nums;
-  font-weight: 560;
-}
-
 #claude-usage-meter-root .cum-icon {
   color: rgb(225, 223, 217);
   display: inline-flex;
@@ -166,9 +164,10 @@
 }
 
 @media (max-width: 820px) {
-  #claude-usage-meter-root {
+  #claude-usage-meter-root,
+  #claude-usage-meter-root[data-has-tokens="true"] {
     bottom: 8px;
-    grid-template-columns: max-content minmax(108px, 1fr) max-content max-content 28px;
+    grid-template-columns: max-content minmax(108px, 1fr) max-content 28px;
     margin-bottom: 0;
     margin-top: 0;
     position: fixed;
@@ -185,9 +184,10 @@
 }
 
 @media (max-width: 560px) {
-  #claude-usage-meter-root {
+  #claude-usage-meter-root,
+  #claude-usage-meter-root[data-has-tokens="true"] {
     font-size: 12px;
-    grid-template-columns: max-content minmax(86px, 1fr) max-content 28px;
+    grid-template-columns: max-content minmax(86px, 1fr) 28px;
     min-height: 40px;
     padding: 0 10px;
   }
