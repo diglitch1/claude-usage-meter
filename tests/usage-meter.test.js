@@ -517,10 +517,16 @@ test("composer detection accepts a composer expanded by a long prompt", () => {
   }), true);
 });
 
-test("content script places the meter above Claude's composer in compact layouts", () => {
+test("content script selects a bottom-docked meter layout for compact viewports", () => {
   const compactHarness = createContentLifecycleHarness({ viewportWidth: 683 });
   const wideHarness = createContentLifecycleHarness({ viewportWidth: 1200 });
 
-  assert.equal(compactHarness.hooks.shouldPlaceBarBeforeComposer(), true);
-  assert.equal(wideHarness.hooks.shouldPlaceBarBeforeComposer(), false);
+  assert.equal(compactHarness.hooks.isCompactLayout(), true);
+  assert.equal(wideHarness.hooks.isCompactLayout(), false);
+
+  const contentSource = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+  const stylesSource = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
+  assert.match(contentSource, /composer\.nextSibling !== bar/);
+  assert.match(stylesSource, /data-cum-meter-compact-host/);
+  assert.match(stylesSource, /@media \(max-width: 820px\)[\s\S]*position: fixed/);
 });

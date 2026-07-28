@@ -17,6 +17,7 @@
   const STORAGE_PULL_MS = 90000;
   const USAGE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
   const COMPACT_LAYOUT_MAX_WIDTH = 820;
+  const COMPACT_METER_RESERVE_PX = 52;
 
   const ICONS = {
     message:
@@ -84,6 +85,7 @@
   let lastBackgroundRefreshRequestAt = 0;
   let lastConvTokenFetchTime = 0;
   let lastConvTokenFetchId = null;
+  let compactComposer = null;
 
   const contentTestMode =
     typeof globalThis !== "undefined" && Boolean(globalThis.__CUM_CONTENT_TEST__);
@@ -92,7 +94,7 @@
     globalThis.__CUM_CONTENT_TEST_HOOKS__ = {
       isComposerLikeBox,
       reconcileBarElement,
-      shouldPlaceBarBeforeComposer
+      isCompactLayout
     };
   } else {
     init();
@@ -904,16 +906,8 @@
     // not accumulate click handlers from multiple script instances.
     bar.onclick = () => window.location.assign(SETTINGS_URL);
 
-    const placeBeforeComposer = shouldPlaceBarBeforeComposer();
-    const isInResponsivePosition = placeBeforeComposer
-      ? composer.previousSibling === bar
-      : composer.nextSibling === bar;
-
-    if (!isInResponsivePosition) {
-      composer.parentNode.insertBefore(
-        bar,
-        placeBeforeComposer ? composer : composer.nextSibling
-      );
+    if (composer.nextSibling !== bar) {
+      composer.parentNode.insertBefore(bar, composer.nextSibling);
       didInsert = true;
     }
 
@@ -922,7 +916,7 @@
     }
   }
 
-  function shouldPlaceBarBeforeComposer() {
+  function isCompactLayout() {
     const viewportWidth =
       window.innerWidth || document.documentElement.clientWidth || Number.POSITIVE_INFINITY;
     return viewportWidth <= COMPACT_LAYOUT_MAX_WIDTH;
@@ -949,14 +943,55 @@
   function syncBarLayoutWithComposer(composer) {
     const rect = composer.getBoundingClientRect();
     const computed = window.getComputedStyle(composer);
+    const compact = isCompactLayout();
 
     bar.style.width = `${Math.round(rect.width)}px`;
     bar.style.maxWidth = computed.maxWidth && computed.maxWidth !== "none" ? computed.maxWidth : "100%";
+    bar.dataset.layout = compact ? "compact" : "wide";
+
+    if (compact) {
+      reserveCompactMeterSpace(composer, computed);
+      bar.style.left = `${Math.round(rect.left)}px`;
+      bar.style.marginLeft = "0px";
+      bar.style.marginRight = "0px";
+      return;
+    }
+
+    releaseCompactMeterSpace();
+    bar.style.removeProperty("left");
     bar.style.marginLeft = computed.marginLeft;
     bar.style.marginRight = computed.marginRight;
   }
 
+  function reserveCompactMeterSpace(composer, computed) {
+    if (compactComposer && compactComposer !== composer) {
+      releaseCompactMeterSpace();
+    }
+
+    compactComposer = composer;
+    if (!composer.hasAttribute("data-cum-meter-compact-host")) {
+      const originalMargin = /^\d+(?:\.\d+)?px$/.test(computed.marginBottom)
+        ? computed.marginBottom
+        : "0px";
+      composer.style.setProperty("--cum-original-margin-bottom", originalMargin);
+      composer.style.setProperty("--cum-meter-reserve", `${COMPACT_METER_RESERVE_PX}px`);
+      composer.setAttribute("data-cum-meter-compact-host", "true");
+    }
+  }
+
+  function releaseCompactMeterSpace() {
+    if (!compactComposer) {
+      return;
+    }
+
+    compactComposer.removeAttribute("data-cum-meter-compact-host");
+    compactComposer.style.removeProperty("--cum-original-margin-bottom");
+    compactComposer.style.removeProperty("--cum-meter-reserve");
+    compactComposer = null;
+  }
+
   function removeBar() {
+    releaseCompactMeterSpace();
     Array.from(document.querySelectorAll(`[id="${ROOT_ID}"]`)).forEach((mountedBar) => {
       mountedBar.remove();
     });
