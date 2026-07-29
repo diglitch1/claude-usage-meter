@@ -1,8 +1,8 @@
 # AMO review notes for 0.2.0
 
 The extension's own JavaScript and CSS are shipped as readable source and have
-no project build step. The runtime ZIP contains `manifest.json`, `icons/`,
-`src/`, and `THIRD_PARTY_NOTICES.md`.
+no project build step. The runtime ZIP contains `manifest.json`, `icons/`, and
+`src/`.
 
 ## Bundled third-party tokenizer
 
