@@ -1,5 +1,6 @@
 (function () {
   const ROOT_ID = "claude-usage-meter-root";
+  const DETAILS_ID = "claude-usage-meter-details";
   const STORAGE_KEY = "claudeUsageMeterStateV2";
   const LEGACY_STORAGE_KEY = "claudeUsageMeterStateV1";
   const CONVERSATION_TOKENS_UI_KEY = "conversationTokensUI";
@@ -90,6 +91,7 @@
   let compactComposer = null;
   let didScanInlinePlan = false;
   let usageRefreshPending = false;
+  let detailsOpen = false;
 
   const contentTestMode =
     typeof globalThis !== "undefined" && Boolean(globalThis.__CUM_CONTENT_TEST__);
@@ -104,7 +106,9 @@
       findPlanInValue,
       selectConversationTokenState,
       formatEstimatedTokenCount,
-      formatLastUpdatedAt
+      formatLastUpdatedAt,
+      buildUsageDetails,
+      formatDuration
     };
   } else {
     init();
@@ -891,8 +895,80 @@
       resetText: usageData ? usageData.resetText : sync.fallbackText,
       conversationTokens,
       syncState: sync.state,
-      syncTitle: sync.title
+      syncTitle: sync.title,
+      details: buildUsageDetails(state.usage)
     };
+  }
+
+  function buildUsageDetails(usageValue) {
+    const usage = usageValue && typeof usageValue === "object" ? usageValue : {};
+    const fiveHourPercent = coerceOptionalPercent(usage.fiveHourPercent ?? usage.usagePercent);
+    const sevenDayPercent = coerceOptionalPercent(usage.sevenDayPercent);
+    const extraUsagePercent = coerceOptionalPercent(usage.extraUsagePercent);
+    const rows = [];
+
+    if (fiveHourPercent !== null) {
+      rows.push({
+        key: "five-hour",
+        label: "5-hour",
+        percent: fiveHourPercent,
+        detail: formatDetailReset(usage.fiveHourResetAt ?? usage.resetAt)
+      });
+    }
+    if (sevenDayPercent !== null) {
+      rows.push({
+        key: "weekly",
+        label: "Weekly",
+        percent: sevenDayPercent,
+        detail: formatDetailReset(usage.sevenDayResetAt)
+      });
+    }
+    if (extraUsagePercent !== null) {
+      rows.push({
+        key: "extra",
+        label: "Extra usage",
+        percent: extraUsagePercent,
+        detail: formatExtraUsageAmount(
+          usage.extraUsageUsedCredits,
+          usage.extraUsageMonthlyLimit,
+          usage.extraUsageCurrency
+        )
+      });
+    }
+
+    return rows;
+  }
+
+  function coerceOptionalPercent(value) {
+    return value === null || value === undefined || value === ""
+      ? null
+      : coercePercent(value);
+  }
+
+  function formatDetailReset(resetAt) {
+    const timestamp = Number(resetAt);
+    return Number.isFinite(timestamp) && timestamp > 0
+      ? `resets in ${formatDuration(timestamp - Date.now())}`
+      : "";
+  }
+
+  function formatExtraUsageAmount(usedCredits, monthlyLimit, currency) {
+    const used = Number(usedCredits);
+    const limit = Number(monthlyLimit);
+    const currencyCode = String(currency || "").trim().toUpperCase();
+    if (!Number.isFinite(used) || !Number.isFinite(limit) || !currencyCode) {
+      return "";
+    }
+
+    try {
+      const formatter = new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: currencyCode
+      });
+      return `${formatter.format(used / 100)} of ${formatter.format(limit / 100)}`;
+    } catch (_error) {
+      return `${currencyCode} ${(used / 100).toFixed(2)} of ${(limit / 100).toFixed(2)}`;
+    }
   }
 
   function getClaudeUsageData() {
@@ -1066,15 +1142,17 @@
           <span>${escapeHtml(tokenText)}</span>
         </span>`
       : "";
+    const detailsHtml = renderUsageDetails(usageState.details);
 
     bar.dataset.usageTone = tone;
     bar.dataset.hasTokens = tokenText ? "true" : "false";
     bar.dataset.syncState = usageState.syncState;
+    bar.dataset.detailsOpen = detailsOpen ? "true" : "false";
     bar.style.setProperty("--cum-progress", progress);
     bar.setAttribute("aria-label", "Claude usage meter");
 
     const html = `
-      <a class="cum-main" href="${SETTINGS_URL}" aria-label="Open Claude usage settings">
+      <button class="cum-main" type="button" aria-expanded="${detailsOpen ? "true" : "false"}" aria-controls="${DETAILS_ID}" aria-label="Toggle Claude usage details">
         <span class="cum-section cum-window" title="${escapeHtml(planTooltip)}">
           <span class="cum-status-dot"></span>
           <span class="cum-plan-name">${escapeHtml(planText)}</span>
@@ -1089,16 +1167,38 @@
           <span>${escapeHtml(usageState.resetText || "open usage to sync")}</span>
         </span>
         ${tokenSection}
-      </a>
+      </button>
       <button class="cum-refresh" type="button" title="${escapeHtml(usageState.syncTitle)}" aria-label="${escapeHtml(usageState.syncTitle)}"${usageState.syncState === "loading" ? " disabled" : ""}>
         <span class="cum-icon">${ICONS.refresh}</span>
       </button>
+      <div class="cum-details" id="${DETAILS_ID}"${detailsOpen ? "" : " hidden"}>
+        <div class="cum-details-header">
+          <span>Usage details</span>
+          <a href="${SETTINGS_URL}">Claude settings</a>
+        </div>
+        ${detailsHtml}
+      </div>
     `;
 
     if (html !== lastRenderedHtml) {
       bar.innerHTML = html;
       lastRenderedHtml = html;
     }
+  }
+
+  function renderUsageDetails(rows) {
+    if (!Array.isArray(rows) || !rows.length) {
+      return '<div class="cum-details-empty">Usage details are not available yet.</div>';
+    }
+
+    return rows.map((row) => `
+      <div class="cum-detail-row" data-detail-key="${escapeHtml(row.key)}">
+        <span class="cum-detail-label">${escapeHtml(row.label)}</span>
+        <span class="cum-detail-track"><span style="width:${coercePercent(row.percent)}%"></span></span>
+        <span class="cum-detail-percent">${coercePercent(row.percent)}%</span>
+        <span class="cum-detail-meta">${escapeHtml(row.detail)}</span>
+      </div>
+    `).join("");
   }
 
   function injectBarBesideComposer(composer, syncLayout = false) {
@@ -1151,6 +1251,14 @@
       ? event.target.closest(".cum-refresh")
       : null;
     if (!refreshButton || usageRefreshPending) {
+      const main = event.target && event.target.closest
+        ? event.target.closest(".cum-main")
+        : null;
+      if (main || event.target === bar) {
+        event.preventDefault();
+        detailsOpen = !detailsOpen;
+        renderBar(buildUsageState());
+      }
       return;
     }
 
@@ -1230,6 +1338,7 @@
 
   function removeBar() {
     releaseCompactMeterSpace();
+    detailsOpen = false;
     Array.from(document.querySelectorAll(`[id="${ROOT_ID}"]`)).forEach((mountedBar) => {
       mountedBar.remove();
     });
@@ -1453,6 +1562,11 @@
     const hours = Math.floor(minutesTotal / 60);
     const minutes = minutesTotal % 60;
 
+    if (hours >= 24) {
+      const days = Math.floor(hours / 24);
+      const remainingHours = hours % 24;
+      return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
+    }
     if (hours > 0) {
       return `${hours}h ${minutes}m`;
     }

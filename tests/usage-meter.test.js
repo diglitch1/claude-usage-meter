@@ -505,6 +505,36 @@ test("meter exposes freshness and a manual refresh control", () => {
   assert.match(styles, /animation: cum-spin/);
 });
 
+test("meter builds expandable five-hour, weekly, and extra-usage details", () => {
+  const harness = createContentLifecycleHarness();
+  assert.equal(harness.hooks.formatDuration((158 * 60 + 5) * 60_000), "6d 14h");
+
+  const rows = harness.hooks.buildUsageDetails({
+    usagePercent: 8,
+    fiveHourPercent: 8,
+    fiveHourResetAt: Date.now() + 2 * 60 * 60_000,
+    sevenDayPercent: 23,
+    sevenDayResetAt: Date.now() + 3 * 24 * 60 * 60_000,
+    extraUsagePercent: 62,
+    extraUsageUsedCredits: 493,
+    extraUsageMonthlyLimit: 800,
+    extraUsageCurrency: "EUR"
+  });
+
+  assert.deepEqual(Array.from(rows, (row) => row.label), ["5-hour", "Weekly", "Extra usage"]);
+  assert.deepEqual(Array.from(rows, (row) => row.percent), [8, 23, 62]);
+  assert.match(rows[2].detail, /4[,.]93/);
+  assert.match(rows[2].detail, /8[,.]00/);
+
+  const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+  const styles = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
+  assert.match(source, /aria-expanded=/);
+  assert.match(source, /class="cum-details"/);
+  assert.match(source, />Claude settings<\/a>/);
+  assert.match(styles, /\.cum-details\s*{/);
+  assert.match(styles, /bottom:\s*calc\(100% \+ 8px\)/);
+});
+
 test("another Claude tab cannot hide the current conversation token estimate", () => {
   const harness = createContentLifecycleHarness();
   const current = {

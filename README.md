@@ -10,6 +10,7 @@ the message composer on `claude.ai`.
 It shows:
 
 - Current 5-hour/session usage percentage and reset timing.
+- Expandable five-hour, weekly, and extra-usage details when Claude provides them.
 - Estimated current-conversation token count, clearly marked with `~`.
 - Usage freshness, stale/error feedback, and manual refresh.
 - Click-through to `https://claude.ai/settings/usage`.

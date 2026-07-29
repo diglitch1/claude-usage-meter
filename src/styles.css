@@ -1,6 +1,7 @@
 #claude-usage-meter-root {
   --cum-bg: rgba(24, 24, 22, 0.76);
   --cum-bg-hover: rgba(32, 32, 30, 0.82);
+  --cum-expanded-bg: rgb(37, 37, 35);
   --cum-border: rgba(255, 255, 255, 0.13);
   --cum-divider: rgba(255, 255, 255, 0.11);
   --cum-text: rgb(244, 243, 238);
@@ -21,21 +22,17 @@
   cursor: default;
   display: grid;
   font: 500 12.5px/1.15 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  grid-template-columns: max-content minmax(132px, 1fr) minmax(96px, max-content) 34px;
+  grid-template-columns: minmax(0, 1fr) 34px;
   letter-spacing: 0;
   margin-bottom: 12px;
   margin-top: 8px;
   min-height: 40px;
-  overflow: hidden;
+  overflow: visible;
   padding: 0 10px;
   position: sticky;
   text-align: left;
   bottom: 8px;
   z-index: 30;
-}
-
-#claude-usage-meter-root[data-has-tokens="true"] {
-  grid-template-columns: max-content minmax(132px, 1fr) minmax(96px, max-content) minmax(112px, max-content) 34px;
 }
 
 #claude-usage-meter-root[data-usage-tone="low"] {
@@ -60,6 +57,10 @@
   outline: none;
 }
 
+#claude-usage-meter-root[data-details-open="true"] {
+  background: var(--cum-expanded-bg);
+}
+
 #claude-usage-meter-root .cum-section {
   align-items: center;
   display: inline-flex;
@@ -71,10 +72,31 @@
 }
 
 #claude-usage-meter-root .cum-main {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: 0;
   color: inherit;
   cursor: pointer;
-  display: contents;
-  text-decoration: none;
+  display: grid;
+  font: inherit;
+  grid-template-columns: max-content minmax(132px, 1fr) minmax(96px, max-content);
+  height: 100%;
+  padding: 0;
+  text-align: left;
+  width: 100%;
+}
+
+#claude-usage-meter-root[data-has-tokens="true"] .cum-main {
+  grid-template-columns: max-content minmax(132px, 1fr) minmax(96px, max-content) minmax(112px, max-content);
+}
+
+#claude-usage-meter-root .cum-main:focus-visible {
+  outline: none;
+}
+
+#claude-usage-meter-root .cum-main:focus-visible .cum-section {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cum-accent) 46%, transparent);
 }
 
 #claude-usage-meter-root .cum-section:not(:first-child) {
@@ -198,6 +220,87 @@
   }
 }
 
+#claude-usage-meter-root .cum-details {
+  background: var(--cum-expanded-bg);
+  border: 1px solid var(--cum-border);
+  border-radius: 14px;
+  bottom: calc(100% + 8px);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28);
+  box-sizing: border-box;
+  color: var(--cum-text);
+  cursor: default;
+  left: 0;
+  padding: 12px;
+  position: absolute;
+  width: 100%;
+  z-index: 2;
+}
+
+#claude-usage-meter-root .cum-details[hidden] {
+  display: none;
+}
+
+#claude-usage-meter-root .cum-details-header {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  font-weight: 680;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+#claude-usage-meter-root .cum-details-header a {
+  color: var(--cum-accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+#claude-usage-meter-root .cum-details-header a:hover,
+#claude-usage-meter-root .cum-details-header a:focus-visible {
+  text-decoration: underline;
+}
+
+#claude-usage-meter-root .cum-detail-row {
+  align-items: center;
+  display: grid;
+  gap: 9px;
+  grid-template-columns: 76px minmax(70px, 1fr) 38px 120px;
+  min-height: 28px;
+}
+
+#claude-usage-meter-root .cum-detail-label,
+#claude-usage-meter-root .cum-detail-percent {
+  font-variant-numeric: tabular-nums;
+  font-weight: 620;
+}
+
+#claude-usage-meter-root .cum-detail-track {
+  background: var(--cum-track);
+  border-radius: 999px;
+  height: 6px;
+  overflow: hidden;
+}
+
+#claude-usage-meter-root .cum-detail-track > span {
+  background: var(--cum-accent);
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+}
+
+#claude-usage-meter-root .cum-detail-percent {
+  text-align: right;
+}
+
+#claude-usage-meter-root .cum-detail-meta,
+#claude-usage-meter-root .cum-details-empty {
+  color: var(--cum-muted);
+}
+
+#claude-usage-meter-root .cum-details-empty {
+  padding: 5px 0 2px;
+}
+
 [data-cum-meter-compact-host="true"] {
   translate: 0 calc(0px - var(--cum-meter-reserve, 52px));
 }
@@ -205,14 +308,18 @@
 @media (max-width: 820px) {
   #claude-usage-meter-root {
     bottom: 8px;
-    grid-template-columns: max-content minmax(108px, 1fr) max-content 32px;
+    grid-template-columns: minmax(0, 1fr) 32px;
     margin-bottom: 0;
     margin-top: 0;
     position: fixed;
   }
 
-  #claude-usage-meter-root[data-has-tokens="true"] {
-    grid-template-columns: max-content minmax(108px, 1fr) max-content minmax(96px, max-content) 32px;
+  #claude-usage-meter-root .cum-main {
+    grid-template-columns: max-content minmax(108px, 1fr) max-content;
+  }
+
+  #claude-usage-meter-root[data-has-tokens="true"] .cum-main {
+    grid-template-columns: max-content minmax(108px, 1fr) max-content minmax(96px, max-content);
   }
 
   #claude-usage-meter-root .cum-section {
@@ -225,13 +332,17 @@
 @media (max-width: 560px) {
   #claude-usage-meter-root {
     font-size: 12px;
-    grid-template-columns: max-content minmax(86px, 1fr) 30px;
+    grid-template-columns: minmax(0, 1fr) 30px;
     min-height: 40px;
     padding: 0 10px;
   }
 
-  #claude-usage-meter-root[data-has-tokens="true"] {
-    grid-template-columns: max-content minmax(86px, 1fr) minmax(90px, max-content) 30px;
+  #claude-usage-meter-root .cum-main {
+    grid-template-columns: max-content minmax(86px, 1fr);
+  }
+
+  #claude-usage-meter-root[data-has-tokens="true"] .cum-main {
+    grid-template-columns: max-content minmax(86px, 1fr) minmax(90px, max-content);
   }
 
   #claude-usage-meter-root .cum-reset {
@@ -241,5 +352,13 @@
   #claude-usage-meter-root .cum-plan-name,
   #claude-usage-meter-root .cum-percent {
     font-size: 13px;
+  }
+
+  #claude-usage-meter-root .cum-detail-row {
+    grid-template-columns: 68px minmax(60px, 1fr) 36px;
+  }
+
+  #claude-usage-meter-root .cum-detail-meta {
+    display: none;
   }
 }
