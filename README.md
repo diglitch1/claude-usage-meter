@@ -3,7 +3,9 @@
 A lightweight Firefox extension that adds a responsive usage meter to the
 Claude.ai message composer.
 
-Current version: `0.1.1` · Firefox · local/temporary installation
+Current version: `0.1.1` · Available from Firefox Add-ons
+
+**[Install Claude Usage Meter from Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/cum-claude-usage-meter/)**
 
 ## Features
 
@@ -20,7 +22,15 @@ Click the meter to open its detailed view. The detail panel contains the weekly
 and extra-usage values, burn forecast, theme selector, and a link to Claude's
 usage settings.
 
-## Install in Firefox
+## Install
+
+### Firefox Add-ons
+
+1. Open the [official Firefox Add-ons listing](https://addons.mozilla.org/en-US/firefox/addon/cum-claude-usage-meter/).
+2. Select **Add to Firefox** and approve the requested permissions.
+3. Open or refresh [Claude.ai](https://claude.ai).
+
+### Temporary development build
 
 1. Download or clone this repository.
 2. Open `about:debugging#/runtime/this-firefox` in Firefox.
@@ -28,8 +38,8 @@ usage settings.
 4. Choose this repository's `manifest.json`.
 5. Open or refresh [Claude.ai](https://claude.ai).
 
-Firefox removes temporary add-ons when the browser restarts, so repeat these
-steps when necessary.
+Firefox removes manually loaded temporary builds when the browser restarts. The
+version installed from Firefox Add-ons remains installed and updates normally.
 
 ## Accuracy and Privacy
 
