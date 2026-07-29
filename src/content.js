@@ -12,6 +12,7 @@
   const UPDATE_DEBOUNCE_MS = 350;
   const DOM_POLL_MS = 3000;
   const ORG_SCAN_INTERVAL_MS = 3000;
+  const PLAN_SCAN_INTERVAL_MS = 30000;
   const BACKGROUND_REFRESH_MIN_MS = 30000;
   const CONV_FETCH_INTERVAL_MS = 15000;
   const STORAGE_PULL_MS = 90000;
@@ -21,9 +22,7 @@
 
   const ICONS = {
     token:
-      '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>',
-    external:
-      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>'
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>'
   };
 
   const fallbackStorage = {
@@ -80,10 +79,12 @@
   let domPollTimer = 0;
   let storagePullTimer = 0;
   let nextOrgScanAt = 0;
+  let nextPlanScanAt = 0;
   let lastBackgroundRefreshRequestAt = 0;
   let lastConvTokenFetchTime = 0;
   let lastConvTokenFetchId = null;
   let compactComposer = null;
+  let didScanInlinePlan = false;
 
   const contentTestMode =
     typeof globalThis !== "undefined" && Boolean(globalThis.__CUM_CONTENT_TEST__);
@@ -95,6 +96,7 @@
       isCompactLayout,
       normalizePlanName,
       pickPlan,
+      findPlanInValue,
       formatEstimatedTokenCount
     };
   } else {
@@ -105,6 +107,7 @@
     state = await loadState();
     installStoragePolling();
     detectAndPersistOrgId(true);
+    detectAndPersistPlan(true);
     requestBackgroundUsageRefresh("content-open", true);
     installDomPoller();
     installRouteAndViewportListeners();
@@ -439,6 +442,135 @@
     return true;
   }
 
+  function detectAndPersistPlan(force = false) {
+    const now = Date.now();
+    const currentPlan = normalizePlanName(state.usage && state.usage.plan);
+    if (currentPlan && !force) {
+      return currentPlan;
+    }
+    if (!force && now < nextPlanScanAt) {
+      return currentPlan;
+    }
+
+    nextPlanScanAt = now + PLAN_SCAN_INTERVAL_MS;
+    const detectedPlan =
+      detectPlanFromSettingsPage() ||
+      findPlanInWebStorage(window.localStorage) ||
+      findPlanInWebStorage(window.sessionStorage) ||
+      findPlanInInlineState();
+    const plan = normalizePlanName(detectedPlan);
+    if (!plan || plan === currentPlan) {
+      return plan;
+    }
+
+    state.usage = Object.assign({}, state.usage, { plan });
+    if (state.organizationId) {
+      storeUsageForOrg(state.organizationId, state.usage);
+    }
+    scheduleSave();
+    scheduleUpdate({});
+    return plan;
+  }
+
+  function detectPlanFromSettingsPage() {
+    if (!/^\/settings(?:\/|$)/i.test(window.location.pathname) || !document.body) {
+      return "";
+    }
+    return pickPlan(normalizeLines(document.body.innerText || ""));
+  }
+
+  function findPlanInWebStorage(storage) {
+    if (!storage) {
+      return "";
+    }
+
+    try {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        const raw = storage.getItem(key) || "";
+        if (!raw || !/plan|subscription|billing|tier|capabilit/i.test(raw)) {
+          continue;
+        }
+
+        try {
+          const plan = findPlanInValue(JSON.parse(raw));
+          if (plan) {
+            return plan;
+          }
+        } catch (_error) {
+          if (/plan|subscription|billing|tier/i.test(String(key || ""))) {
+            const plan = normalizePlanName(raw);
+            if (plan) {
+              return plan;
+            }
+          }
+        }
+      }
+    } catch (_error) {
+      return "";
+    }
+
+    return "";
+  }
+
+  function findPlanInValue(value, path = [], depth = 0) {
+    if (value == null || depth > 7) {
+      return "";
+    }
+
+    if (typeof value === "string") {
+      const hasPlanMetadataPath = path.some((key) =>
+        /plan|subscription|billing|tier|capabilit/i.test(String(key || ""))
+      );
+      return hasPlanMetadataPath ? normalizePlanName(value) : "";
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const plan = findPlanInValue(item, path, depth + 1);
+        if (plan) {
+          return plan;
+        }
+      }
+      return "";
+    }
+
+    if (typeof value !== "object") {
+      return "";
+    }
+
+    for (const [key, item] of Object.entries(value)) {
+      const plan = findPlanInValue(item, path.concat(key), depth + 1);
+      if (plan) {
+        return plan;
+      }
+    }
+    return "";
+  }
+
+  function findPlanInInlineState() {
+    if (didScanInlinePlan) {
+      return "";
+    }
+    didScanInlinePlan = true;
+
+    const scripts = Array.from(document.querySelectorAll("script")).slice(0, 40);
+    const pattern = /(?:plan_type|planType|subscription_type|subscriptionType|rate_limit_tier|rateLimitTier|billing_plan|billingPlan)["']?\s*[:=]\s*["']([^"']+)["']/i;
+
+    for (const script of scripts) {
+      const text = script.textContent || "";
+      if (!/plan|subscription|billing|tier/i.test(text)) {
+        continue;
+      }
+      const match = text.match(pattern);
+      const plan = normalizePlanName(match && match[1]);
+      if (plan) {
+        return plan;
+      }
+    }
+    return "";
+  }
+
   function getUsageForOrg(orgId) {
     const normalized = normalizeOrgId(orgId);
     if (!normalized || !state.usageByOrg || !state.usageByOrg[normalized]) {
@@ -658,6 +790,7 @@
       }
 
       const orgId = detectAndPersistOrgId();
+      detectAndPersistPlan();
       if (orgId && orgId !== previousOrgId) {
         requestBackgroundUsageRefresh("org-detected", true, orgId);
       }
@@ -678,6 +811,7 @@
     window.addEventListener("focus", () => {
       scheduleUpdate({ forceComposerScan: true });
       detectAndPersistOrgId(true);
+      detectAndPersistPlan(true);
     }, {
       passive: true
     });
@@ -685,6 +819,7 @@
       if (!document.hidden) {
         scheduleUpdate({ forceComposerScan: true });
         detectAndPersistOrgId(true);
+        detectAndPersistPlan(true);
       }
     });
   }
@@ -730,7 +865,9 @@
 
     return {
       windowLabel: usageData ? usageData.windowLabel : "5h",
-      plan: usageData ? usageData.plan : "",
+      plan: normalizePlanName(
+        (usageData && usageData.plan) || (state.usage && state.usage.plan)
+      ),
       usagePercent: usageData ? usageData.usagePercent : null,
       resetText: usageData ? usageData.resetText : "open usage to sync",
       conversationTokens
@@ -876,9 +1013,6 @@
       </span>
       <span class="cum-section cum-reset">${escapeHtml(usageState.resetText || "open usage to sync")}</span>
       ${tokenSection}
-      <span class="cum-section cum-open">
-        <span class="cum-icon">${ICONS.external}</span>
-      </span>
     `;
 
     if (html !== lastRenderedHtml) {
@@ -1268,7 +1402,7 @@
 
   function formatEstimatedTokenCount(value) {
     return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value))
-      ? `~${Math.max(0, Math.round(Number(value))).toLocaleString()}`
+      ? `~${Math.max(0, Math.round(Number(value))).toLocaleString()} tokens`
       : "";
   }
 

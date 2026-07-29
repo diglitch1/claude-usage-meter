@@ -360,6 +360,37 @@ test("background stores known usage response fields per organization", async () 
   assert.equal(state.usage.usagePercent, 91);
 });
 
+test("background falls back to Claude organization metadata for the plan", async () => {
+  const harness = createBackgroundHarness(async (url) => {
+    if (url.endsWith("/api/organizations")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [{
+            uuid: ORG_A,
+            rate_limit_tier: "claude_max_5x"
+          }];
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return makeUsageResponse({
+          utilization: 34,
+          resetsAt: "2026-05-14T18:30:01.095671+00:00"
+        });
+      }
+    };
+  });
+
+  await harness.send({ type: "CUM_REFRESH_USAGE", force: true, orgId: ORG_A });
+  assert.equal(harness.getState().usage.plan, "Max 5x");
+});
+
 test("background clears old active usage when a 200 response cannot be parsed", async () => {
   let response = makeUsageResponse({
     utilization: 45,
@@ -421,12 +452,20 @@ test("plan labels are normalized and never guessed", () => {
     harness.hooks.pickPlan("Settings\nPlan usage limits Free\nCurrent session\n8%"),
     "Free"
   );
+  assert.equal(harness.hooks.findPlanInValue({
+    account: {
+      subscription: {
+        plan_type: "team_premium"
+      }
+    }
+  }), "Team");
   assert.equal(harness.hooks.formatEstimatedTokenCount(null), "");
-  assert.match(harness.hooks.formatEstimatedTokenCount(44252), /^~44[,.]252$/);
+  assert.match(harness.hooks.formatEstimatedTokenCount(44252), /^~44[,.]252 tokens$/);
 
   const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
   assert.doesNotMatch(source, /usageData \? usageData\.plan : "Pro"/);
   assert.doesNotMatch(source, /usageState\.plan \|\| "Pro"/);
+  assert.doesNotMatch(source, /cum-open|ICONS\.external/);
 });
 
 test("content script avoids hot observers and push-style storage updates", () => {

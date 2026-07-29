@@ -166,8 +166,14 @@
       }
 
       const data = await res.json();
+      const previousUsage = getUsageForOrg(state, orgId) || state.usage || {};
+      const detectedPlan =
+        extractPlanFromUsageResponse(data) ||
+        normalizePlanName(previousUsage.plan) ||
+        await fetchOrganizationPlan(orgId);
       return markUsageSuccess({
         data,
+        detectedPlan,
         orgId,
         reason: options.reason
       });
@@ -182,12 +188,17 @@
     }
   }
 
-  async function markUsageSuccess({ data, orgId, reason }) {
+  async function markUsageSuccess({ data, detectedPlan, orgId, reason }) {
     const now = Date.now();
     const state = await loadState();
     rollDayIfNeeded(state, now);
 
-    const normalized = normalizeUsageResponse(data, getUsageForOrg(state, orgId) || state.usage || {}, now);
+    const normalized = normalizeUsageResponse(
+      data,
+      getUsageForOrg(state, orgId) || state.usage || {},
+      now,
+      detectedPlan
+    );
     state.organizationId = orgId;
     state.usageFetch = {
       status: normalized ? "ok" : "ok-unparsed",
@@ -569,7 +580,7 @@
     return null;
   }
 
-  function normalizeUsageResponse(data, previousUsage, now) {
+  function normalizeUsageResponse(data, previousUsage, now, detectedPlan = "") {
     if (!data || typeof data !== "object") {
       return null;
     }
@@ -610,7 +621,10 @@
 
     return {
       windowLabel: "5h",
-      plan: extractPlanFromUsageResponse(data) || normalizePlanName(previousUsage.plan),
+      plan:
+        normalizePlanName(detectedPlan) ||
+        extractPlanFromUsageResponse(data) ||
+        normalizePlanName(previousUsage.plan),
       usagePercent,
       resetText,
       resetAt,
@@ -636,9 +650,80 @@
       data.plan,
       data.plan_type,
       data.subscription_type,
+      data.billing_type,
+      data.account_type,
       data.subscription && data.subscription.plan,
       data.organization && data.organization.plan,
       data.account && data.account.plan
+    ];
+
+    for (const candidate of candidates) {
+      const plan = normalizePlanName(candidate);
+      if (plan) {
+        return plan;
+      }
+    }
+
+    return "";
+  }
+
+  async function fetchOrganizationPlan(orgId) {
+    let response = null;
+    try {
+      response = await fetch("https://claude.ai/api/organizations", {
+        credentials: "include",
+        headers: {
+          "anthropic-client-platform": "web_claude_ai",
+          "content-type": "application/json"
+        }
+      });
+    } catch (_error) {
+      return "";
+    }
+
+    if (!response || !response.ok) {
+      return "";
+    }
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (_error) {
+      return "";
+    }
+
+    const records = Array.isArray(data)
+      ? data
+      : data && Array.isArray(data.organizations)
+        ? data.organizations
+        : [];
+    const record = records.find((item) => {
+      if (!item || typeof item !== "object") {
+        return false;
+      }
+      const recordId = item.uuid || item.id || item.organization_id || item.organizationId;
+      return String(recordId || "") === orgId;
+    });
+
+    return extractPlanFromOrganizationRecord(record);
+  }
+
+  function extractPlanFromOrganizationRecord(record) {
+    if (!record || typeof record !== "object") {
+      return "";
+    }
+
+    const candidates = [
+      record.plan,
+      record.plan_type,
+      record.subscription_type,
+      record.rate_limit_tier,
+      record.billing_plan,
+      record.billing_type,
+      record.account_type,
+      record.subscription && record.subscription.plan,
+      record.subscription && record.subscription.type,
+      ...(Array.isArray(record.capabilities) ? record.capabilities : [])
     ];
 
     for (const candidate of candidates) {
@@ -808,6 +893,7 @@
       extractConversationText,
       countConversationTokens,
       normalizePlanName,
+      extractPlanFromOrganizationRecord,
       normalizeConversationId,
       CONV_FETCH_INTERVAL_MS,
       CONTEXT_LIMIT
