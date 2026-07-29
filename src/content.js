@@ -992,10 +992,19 @@
     const percentText = Number.isFinite(percent) ? `${percent}%` : "--";
     const progress = Number.isFinite(percent) ? `${percent}%` : "0%";
     const planText = usageState.plan || "Plan unavailable";
+    const planTooltip = usageState.plan
+      ? `Claude plan: ${usageState.plan}`
+      : "Claude plan could not be detected";
+    const usageTooltip = Number.isFinite(percent)
+      ? `${usageState.windowLabel} usage: ${percent}% used`
+      : `${usageState.windowLabel} usage has not synced yet`;
+    const resetTooltip = usageState.resetText
+      ? `${usageState.windowLabel} usage window; ${usageState.resetText}`
+      : `${usageState.windowLabel} usage window reset time has not synced yet`;
     const tokenText = formatEstimatedTokenCount(usageState.conversationTokens);
     const tokenSection = tokenText
       ? `
-        <span class="cum-section cum-tokens" title="Estimated conversation tokens; Claude's tokenizer is not publicly available">
+        <span class="cum-section cum-tokens" title="Estimated tokens in this chat from sent messages only. Not daily usage. The current draft and hidden context are not included; Claude's tokenizer may differ.">
           <span class="cum-icon">${ICONS.token}</span>
           <span>${escapeHtml(tokenText)}</span>
         </span>`
@@ -1007,15 +1016,15 @@
     bar.setAttribute("aria-label", "Open Claude usage settings");
 
     const html = `
-      <span class="cum-section cum-window">
+      <span class="cum-section cum-window" title="${escapeHtml(planTooltip)}">
         <span class="cum-status-dot"></span>
         <span class="cum-plan-name">${escapeHtml(planText)}</span>
       </span>
-      <span class="cum-section cum-usage">
+      <span class="cum-section cum-usage" title="${escapeHtml(usageTooltip)}">
         <span class="cum-percent">${percentText}</span>
         <span class="cum-progress-track"><span class="cum-progress-fill"></span></span>
       </span>
-      <span class="cum-section cum-reset">
+      <span class="cum-section cum-reset" title="${escapeHtml(resetTooltip)}">
         <span class="cum-icon">${ICONS.clock}</span>
         <span class="cum-limit-label">(${escapeHtml(usageState.windowLabel)})</span>
         <span>${escapeHtml(usageState.resetText || "open usage to sync")}</span>

@@ -433,7 +433,7 @@ test("content shows only an explicitly marked conversation token estimate", () =
   assert.doesNotMatch(backgroundSource, /dailyTokens/);
   assert.match(source, /\bconversationTokens\n/);
   assert.match(source, /formatEstimatedTokenCount/);
-  assert.match(source, /Estimated conversation tokens/);
+  assert.match(source, /Estimated tokens in this chat/);
 });
 
 test("plan labels are normalized and never guessed", () => {
@@ -474,6 +474,17 @@ test("meter leads with the plan and labels the five-hour reset with a clock", ()
   assert.match(source, /class="cum-plan-name"/);
   assert.match(source, /\$\{ICONS\.clock\}/);
   assert.match(source, /class="cum-limit-label">\(\$\{escapeHtml\(usageState\.windowLabel\)\}\)/);
+});
+
+test("meter explains its values with hover text", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+
+  assert.match(source, /Claude plan:/);
+  assert.match(source, /usage: \$\{percent\}% used/);
+  assert.match(source, /usage window; \$\{usageState\.resetText\}/);
+  assert.match(source, /Estimated tokens in this chat from sent messages only/);
+  assert.match(source, /Not daily usage/);
+  assert.match(source, /current draft and hidden context are not included/);
 });
 
 test("another Claude tab cannot hide the current conversation token estimate", () => {
