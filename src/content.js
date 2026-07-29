@@ -21,6 +21,8 @@
   const COMPACT_METER_RESERVE_PX = 52;
 
   const ICONS = {
+    clock:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
     token:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>'
   };
@@ -97,6 +99,7 @@
       normalizePlanName,
       pickPlan,
       findPlanInValue,
+      selectConversationTokenState,
       formatEstimatedTokenCount
     };
   } else {
@@ -222,7 +225,11 @@
     if (stored) {
       mergeStoredUsageState(stored);
     }
-    state.conversationTokensUI = conversationTokensUI;
+    state.conversationTokensUI = selectConversationTokenState(
+      conversationTokensUI,
+      state.conversationTokensUI,
+      getConversationIdFromUrl()
+    );
     if (
       beforeVersion !== getUsageVersion(state) ||
       beforeOrgId !== (state.organizationId || "") ||
@@ -984,9 +991,7 @@
     const tone = getUsageTone(percent);
     const percentText = Number.isFinite(percent) ? `${percent}%` : "--";
     const progress = Number.isFinite(percent) ? `${percent}%` : "0%";
-    const planBadge = usageState.plan
-      ? `<span class="cum-plan-badge">${escapeHtml(usageState.plan)}</span>`
-      : "";
+    const planText = usageState.plan || "Plan unavailable";
     const tokenText = formatEstimatedTokenCount(usageState.conversationTokens);
     const tokenSection = tokenText
       ? `
@@ -1004,14 +1009,17 @@
     const html = `
       <span class="cum-section cum-window">
         <span class="cum-status-dot"></span>
-        <span class="cum-window-label">${escapeHtml(usageState.windowLabel)}</span>
-        ${planBadge}
+        <span class="cum-plan-name">${escapeHtml(planText)}</span>
       </span>
       <span class="cum-section cum-usage">
         <span class="cum-percent">${percentText}</span>
         <span class="cum-progress-track"><span class="cum-progress-fill"></span></span>
       </span>
-      <span class="cum-section cum-reset">${escapeHtml(usageState.resetText || "open usage to sync")}</span>
+      <span class="cum-section cum-reset">
+        <span class="cum-icon">${ICONS.clock}</span>
+        <span class="cum-limit-label">(${escapeHtml(usageState.windowLabel)})</span>
+        <span>${escapeHtml(usageState.resetText || "open usage to sync")}</span>
+      </span>
       ${tokenSection}
     `;
 
@@ -1389,6 +1397,19 @@
       conversationTokens: Math.max(0, Math.round(conversationTokens)),
       updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0
     };
+  }
+
+  function selectConversationTokenState(incomingValue, currentValue, conversationId) {
+    const incoming = normalizeConversationTokensUI(incomingValue);
+    const current = normalizeConversationTokensUI(currentValue);
+
+    if (incoming && incoming.conversationId === conversationId) {
+      return incoming;
+    }
+    if (current && current.conversationId === conversationId) {
+      return current;
+    }
+    return null;
   }
 
   function getCurrentTokenEstimateText() {

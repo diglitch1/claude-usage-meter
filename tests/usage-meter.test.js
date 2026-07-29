@@ -468,6 +468,35 @@ test("plan labels are normalized and never guessed", () => {
   assert.doesNotMatch(source, /cum-open|ICONS\.external/);
 });
 
+test("meter leads with the plan and labels the five-hour reset with a clock", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+
+  assert.match(source, /class="cum-plan-name"/);
+  assert.match(source, /\$\{ICONS\.clock\}/);
+  assert.match(source, /class="cum-limit-label">\(\$\{escapeHtml\(usageState\.windowLabel\)\}\)/);
+});
+
+test("another Claude tab cannot hide the current conversation token estimate", () => {
+  const harness = createContentLifecycleHarness();
+  const current = {
+    conversationId: CONV_A,
+    conversationTokens: 1125,
+    updatedAt: 100
+  };
+  const otherTab = {
+    conversationId: CONV_B,
+    conversationTokens: 2400,
+    updatedAt: 200
+  };
+
+  const selected = harness.hooks.selectConversationTokenState(otherTab, current, CONV_A);
+  assert.equal(selected.conversationId, CONV_A);
+  assert.equal(selected.conversationTokens, 1125);
+
+  const styles = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
+  assert.doesNotMatch(styles, /\.cum-tokens\s*{[^}]*display:\s*none/s);
+});
+
 test("content script avoids hot observers and push-style storage updates", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
 
