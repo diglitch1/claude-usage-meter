@@ -579,7 +579,7 @@ test("meter builds expandable five-hour, weekly, and extra-usage details", () =>
   assert.match(source, /class="cum-details"/);
   assert.match(source, />Claude settings<\/a>/);
   assert.match(styles, /\.cum-details\s*{/);
-  assert.match(styles, /bottom:\s*calc\(100% \+ 8px\)/);
+  assert.match(styles, /bottom:\s*calc\(100% \+ 6px\)/);
 });
 
 test("meter explains when a burn forecast is collecting data or predicts a limit", () => {
@@ -705,4 +705,8 @@ test("content script selects a bottom-docked meter layout for compact viewports"
   assert.match(stylesSource, /data-cum-meter-compact-host/);
   assert.match(stylesSource, /translate:\s*0 calc\(0px - var\(--cum-meter-reserve/);
   assert.match(stylesSource, /@media \(max-width: 820px\)[\s\S]*position: fixed/);
+  assert.match(contentSource, /--cum-composer-radius/);
+  assert.match(stylesSource, /border-radius:\s*var\(--cum-composer-radius/);
+  assert.match(stylesSource, /min-height:\s*36px/);
+  assert.doesNotMatch(stylesSource, /cum-status-pulse/);
 });

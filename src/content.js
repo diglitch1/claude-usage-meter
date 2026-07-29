@@ -19,7 +19,7 @@
   const STORAGE_PULL_MS = 90000;
   const USAGE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
   const COMPACT_LAYOUT_MAX_WIDTH = 820;
-  const COMPACT_METER_RESERVE_PX = 52;
+  const COMPACT_METER_RESERVE_PX = 48;
 
   const ICONS = {
     clock:
@@ -1357,6 +1357,13 @@
     bar.style.width = `${Math.round(rect.width)}px`;
     bar.style.maxWidth = computed.maxWidth && computed.maxWidth !== "none" ? computed.maxWidth : "100%";
     bar.dataset.layout = compact ? "compact" : "wide";
+
+    const composerRadius = computed.borderRadius || computed.borderTopLeftRadius || "";
+    if (composerRadius && !/^0(?:px)?(?:\s+0(?:px)?)*$/.test(composerRadius)) {
+      bar.style.setProperty("--cum-composer-radius", composerRadius);
+    } else {
+      bar.style.removeProperty("--cum-composer-radius");
+    }
 
     if (compact) {
       reserveCompactMeterSpace(composer);
