@@ -3,7 +3,7 @@
 A lightweight Firefox extension that adds a responsive usage meter to the
 Claude.ai message composer.
 
-Current version: `0.1.1` · Available from Firefox Add-ons
+Release candidate: `0.2.0` · Latest approved build available from Firefox Add-ons
 
 **[Install Claude Usage Meter from Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/cum-claude-usage-meter/)**
 
