@@ -11,6 +11,7 @@ It shows:
 
 - Current 5-hour/session usage percentage and reset timing.
 - Estimated current-conversation token count, clearly marked with `~`.
+- Usage freshness, stale/error feedback, and manual refresh.
 - Click-through to `https://claude.ai/settings/usage`.
 
 ## How It Works

@@ -487,6 +487,24 @@ test("meter explains its values with hover text", () => {
   assert.match(source, /current draft and hidden context are not included/);
 });
 
+test("meter exposes freshness and a manual refresh control", () => {
+  const harness = createContentLifecycleHarness();
+  const now = Date.parse("2026-07-29T12:00:00Z");
+
+  assert.equal(harness.hooks.formatLastUpdatedAt(0, now), "Never synced");
+  assert.equal(harness.hooks.formatLastUpdatedAt(now - 20_000, now), "Updated just now");
+  assert.equal(harness.hooks.formatLastUpdatedAt(now - 2 * 60_000, now), "Updated 2m ago");
+  assert.equal(harness.hooks.formatLastUpdatedAt(now - 3 * 60 * 60_000, now), "Updated 3h ago");
+
+  const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+  const styles = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
+  assert.match(source, /class="cum-refresh"/);
+  assert.match(source, /requestBackgroundUsageRefresh\("manual-refresh", true/);
+  assert.match(source, /dataset\.syncState/);
+  assert.match(styles, /data-sync-state="error"/);
+  assert.match(styles, /animation: cum-spin/);
+});
+
 test("another Claude tab cannot hide the current conversation token estimate", () => {
   const harness = createContentLifecycleHarness();
   const current = {

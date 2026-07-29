@@ -23,6 +23,8 @@
   const ICONS = {
     clock:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    refresh:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>',
     token:
       '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>'
   };
@@ -87,6 +89,7 @@
   let lastConvTokenFetchId = null;
   let compactComposer = null;
   let didScanInlinePlan = false;
+  let usageRefreshPending = false;
 
   const contentTestMode =
     typeof globalThis !== "undefined" && Boolean(globalThis.__CUM_CONTENT_TEST__);
@@ -100,7 +103,8 @@
       pickPlan,
       findPlanInValue,
       selectConversationTokenState,
-      formatEstimatedTokenCount
+      formatEstimatedTokenCount,
+      formatLastUpdatedAt
     };
   } else {
     init();
@@ -328,12 +332,14 @@
   function requestBackgroundUsageRefresh(reason, force = false, knownOrgId = null) {
     const now = Date.now();
     if (!force && now - lastBackgroundRefreshRequestAt < BACKGROUND_REFRESH_MIN_MS) {
-      return;
+      return Promise.resolve(null);
     }
 
     lastBackgroundRefreshRequestAt = now;
     const orgId = normalizeOrgId(knownOrgId) || detectAndPersistOrgId(force);
-    sendRuntimeMessage({
+    usageRefreshPending = true;
+    scheduleUpdate({});
+    return sendRuntimeMessage({
       type: MESSAGE_REFRESH_USAGE,
       force,
       orgId,
@@ -347,6 +353,11 @@
       })
       .catch(() => {
         // The content script still works without the optional background cache.
+        return null;
+      })
+      .finally(() => {
+        usageRefreshPending = false;
+        scheduleUpdate({});
       });
   }
 
@@ -869,6 +880,7 @@
       convUI && convUI.conversationId === currentConvId
         ? convUI.conversationTokens
         : null;
+    const sync = getUsageSyncPresentation(Boolean(usageData));
 
     return {
       windowLabel: usageData ? usageData.windowLabel : "5h",
@@ -876,15 +888,17 @@
         (usageData && usageData.plan) || (state.usage && state.usage.plan)
       ),
       usagePercent: usageData ? usageData.usagePercent : null,
-      resetText: usageData ? usageData.resetText : "open usage to sync",
-      conversationTokens
+      resetText: usageData ? usageData.resetText : sync.fallbackText,
+      conversationTokens,
+      syncState: sync.state,
+      syncTitle: sync.title
     };
   }
 
   function getClaudeUsageData() {
     // TODO: replace this adapter if Claude exposes a stable first-party usage API.
     const usage = state.usage;
-    if (usage.stale || (state.organizationId && usage.organizationId && usage.organizationId !== state.organizationId)) {
+    if (state.organizationId && usage.organizationId && usage.organizationId !== state.organizationId) {
       return null;
     }
     if (!Number.isFinite(usage.usagePercent)) {
@@ -897,7 +911,9 @@
       : Date.now() - usage.updatedAt < USAGE_CACHE_MAX_AGE_MS;
 
     if (!hasFreshReset) {
-      requestBackgroundUsageRefresh("usage-window-expired", true, state.organizationId);
+      if (!usageRefreshPending) {
+        requestBackgroundUsageRefresh("usage-window-expired", true, state.organizationId);
+      }
       return null;
     }
 
@@ -906,7 +922,48 @@
       plan: normalizePlanName(usage.plan),
       usagePercent: usage.usagePercent,
       resetText,
+      stale: Boolean(usage.stale),
       source: usage.source || "settings-cache"
+    };
+  }
+
+  function getUsageSyncPresentation(hasUsageData) {
+    const usage = state.usage || {};
+    const usageFetch = state.usageFetch || {};
+    const updatedAt = Number(usage.updatedAt) || Number(usageFetch.lastSuccessAt) || 0;
+    const updatedText = formatLastUpdatedAt(updatedAt);
+
+    if (usageRefreshPending) {
+      return {
+        state: "loading",
+        fallbackText: "syncing…",
+        title: `${updatedText}. Refreshing Claude usage…`
+      };
+    }
+
+    if (usage.stale || usageFetch.stale) {
+      const hasCachedValue = hasUsageData && Number.isFinite(usage.usagePercent);
+      return {
+        state: hasCachedValue ? "stale" : "error",
+        fallbackText: hasCachedValue ? "cached usage" : "sync failed",
+        title: hasCachedValue
+          ? `${updatedText}. Showing cached usage; click to retry.`
+          : `${updatedText}. Usage sync failed; click to retry.`
+      };
+    }
+
+    if (!updatedAt) {
+      return {
+        state: "stale",
+        fallbackText: "open usage to sync",
+        title: "Usage has not synced yet; click to refresh."
+      };
+    }
+
+    return {
+      state: "ok",
+      fallbackText: "open usage to sync",
+      title: `${updatedText}. Click to refresh.`
     };
   }
 
@@ -1012,24 +1069,30 @@
 
     bar.dataset.usageTone = tone;
     bar.dataset.hasTokens = tokenText ? "true" : "false";
+    bar.dataset.syncState = usageState.syncState;
     bar.style.setProperty("--cum-progress", progress);
-    bar.setAttribute("aria-label", "Open Claude usage settings");
+    bar.setAttribute("aria-label", "Claude usage meter");
 
     const html = `
-      <span class="cum-section cum-window" title="${escapeHtml(planTooltip)}">
-        <span class="cum-status-dot"></span>
-        <span class="cum-plan-name">${escapeHtml(planText)}</span>
-      </span>
-      <span class="cum-section cum-usage" title="${escapeHtml(usageTooltip)}">
-        <span class="cum-percent">${percentText}</span>
-        <span class="cum-progress-track"><span class="cum-progress-fill"></span></span>
-      </span>
-      <span class="cum-section cum-reset" title="${escapeHtml(resetTooltip)}">
-        <span class="cum-icon">${ICONS.clock}</span>
-        <span class="cum-limit-label">(${escapeHtml(usageState.windowLabel)})</span>
-        <span>${escapeHtml(usageState.resetText || "open usage to sync")}</span>
-      </span>
-      ${tokenSection}
+      <a class="cum-main" href="${SETTINGS_URL}" aria-label="Open Claude usage settings">
+        <span class="cum-section cum-window" title="${escapeHtml(planTooltip)}">
+          <span class="cum-status-dot"></span>
+          <span class="cum-plan-name">${escapeHtml(planText)}</span>
+        </span>
+        <span class="cum-section cum-usage" title="${escapeHtml(usageTooltip)}">
+          <span class="cum-percent">${percentText}</span>
+          <span class="cum-progress-track"><span class="cum-progress-fill"></span></span>
+        </span>
+        <span class="cum-section cum-reset" title="${escapeHtml(resetTooltip)}">
+          <span class="cum-icon">${ICONS.clock}</span>
+          <span class="cum-limit-label">(${escapeHtml(usageState.windowLabel)})</span>
+          <span>${escapeHtml(usageState.resetText || "open usage to sync")}</span>
+        </span>
+        ${tokenSection}
+      </a>
+      <button class="cum-refresh" type="button" title="${escapeHtml(usageState.syncTitle)}" aria-label="${escapeHtml(usageState.syncTitle)}"${usageState.syncState === "loading" ? " disabled" : ""}>
+        <span class="cum-icon">${ICONS.refresh}</span>
+      </button>
     `;
 
     if (html !== lastRenderedHtml) {
@@ -1046,17 +1109,22 @@
     let didInsert = false;
     reconcileBarElement();
 
+    if (bar && bar.tagName && bar.tagName.toLowerCase() !== "div") {
+      bar.remove();
+      bar = null;
+    }
+
     if (!bar) {
-      bar = document.createElement("button");
+      bar = document.createElement("div");
       bar.id = ROOT_ID;
-      bar.type = "button";
       bar.className = "claude-usage-meter";
+      bar.setAttribute("role", "group");
       didInsert = true;
     }
 
     // Assignment is intentional: a bar adopted after a content-script reload must
-    // not accumulate click handlers from multiple script instances.
-    bar.onclick = () => window.location.assign(SETTINGS_URL);
+    // not accumulate handlers from multiple script instances.
+    bar.onclick = handleBarClick;
 
     const compact = isCompactLayout();
     const targetParent = compact && document.body ? document.body : composer.parentNode;
@@ -1076,6 +1144,19 @@
     if (syncLayout || didInsert) {
       syncBarLayoutWithComposer(composer);
     }
+  }
+
+  function handleBarClick(event) {
+    const refreshButton = event.target && event.target.closest
+      ? event.target.closest(".cum-refresh")
+      : null;
+    if (!refreshButton || usageRefreshPending) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    requestBackgroundUsageRefresh("manual-refresh", true, state.organizationId);
   }
 
   function isCompactLayout() {
@@ -1434,6 +1515,29 @@
     return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value))
       ? `~${Math.max(0, Math.round(Number(value))).toLocaleString()} tokens`
       : "";
+  }
+
+  function formatLastUpdatedAt(timestamp, now = Date.now()) {
+    const updatedAt = Number(timestamp);
+    if (!Number.isFinite(updatedAt) || updatedAt <= 0) {
+      return "Never synced";
+    }
+
+    const elapsedMs = Math.max(0, Number(now) - updatedAt);
+    const elapsedMinutes = Math.floor(elapsedMs / 60000);
+    if (elapsedMinutes < 1) {
+      return "Updated just now";
+    }
+    if (elapsedMinutes < 60) {
+      return `Updated ${elapsedMinutes}m ago`;
+    }
+
+    const elapsedHours = Math.floor(elapsedMinutes / 60);
+    if (elapsedHours < 24) {
+      return `Updated ${elapsedHours}h ago`;
+    }
+
+    return `Updated ${Math.floor(elapsedHours / 24)}d ago`;
   }
 
   function getDayKey(timestamp = Date.now()) {
