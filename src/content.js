@@ -108,7 +108,8 @@
       formatEstimatedTokenCount,
       formatLastUpdatedAt,
       buildUsageDetails,
-      formatDuration
+      formatDuration,
+      buildBurnForecastPresentation
     };
   } else {
     init();
@@ -896,7 +897,8 @@
       conversationTokens,
       syncState: sync.state,
       syncTitle: sync.title,
-      details: buildUsageDetails(state.usage)
+      details: buildUsageDetails(state.usage),
+      forecast: buildBurnForecastPresentation(state.usage && state.usage.burnForecast)
     };
   }
 
@@ -969,6 +971,47 @@
     } catch (_error) {
       return `${currencyCode} ${(used / 100).toFixed(2)} of ${(limit / 100).toFixed(2)}`;
     }
+  }
+
+  function buildBurnForecastPresentation(value, now = Date.now()) {
+    const explanation = "Forecasts whether your current 5-hour usage pace will reach Claude's limit before it resets.";
+    const forecast = value && typeof value === "object" ? value : null;
+    const calculatedAt = Number(forecast && forecast.calculatedAt);
+    const sampleCount = Number(forecast && forecast.sampleCount);
+    const observedMinutes = Number(forecast && forecast.observedMinutes);
+    const percentPerHour = Number(forecast && forecast.percentPerHour);
+    const estimatedLimitAt = Number(forecast && forecast.estimatedLimitAt);
+    const isRecent = Number.isFinite(calculatedAt) && now - calculatedAt <= 20 * 60 * 1000;
+
+    if (
+      !isRecent ||
+      !Number.isFinite(sampleCount) || sampleCount < 3 ||
+      !Number.isFinite(observedMinutes) || observedMinutes < 10 ||
+      !Number.isFinite(percentPerHour) || percentPerHour <= 0
+    ) {
+      return {
+        tone: "waiting",
+        message: "—",
+        title: `${explanation} A dash means there has not been enough usage change over at least 10 minutes in this reset window. This is only an estimate.`
+      };
+    }
+
+    const title = `${explanation} Based on ${sampleCount} samples over ${observedMinutes}m at ${percentPerHour}% per hour. Actual usage can vary.`;
+    if (forecast.willHitBeforeReset === true && Number.isFinite(estimatedLimitAt)) {
+      return {
+        tone: "risk",
+        message: estimatedLimitAt <= now
+          ? "limit around now"
+          : `limit in about ${formatDuration(estimatedLimitAt - now)}`,
+        title
+      };
+    }
+
+    return {
+      tone: "safe",
+      message: "likely below the limit until reset",
+      title
+    };
   }
 
   function getClaudeUsageData() {
@@ -1143,6 +1186,7 @@
         </span>`
       : "";
     const detailsHtml = renderUsageDetails(usageState.details);
+    const forecastHtml = renderBurnForecast(usageState.forecast);
 
     bar.dataset.usageTone = tone;
     bar.dataset.hasTokens = tokenText ? "true" : "false";
@@ -1177,6 +1221,7 @@
           <a href="${SETTINGS_URL}">Claude settings</a>
         </div>
         ${detailsHtml}
+        ${forecastHtml}
       </div>
     `;
 
@@ -1199,6 +1244,19 @@
         <span class="cum-detail-meta">${escapeHtml(row.detail)}</span>
       </div>
     `).join("");
+  }
+
+  function renderBurnForecast(forecast) {
+    if (!forecast) {
+      return "";
+    }
+
+    return `
+      <div class="cum-forecast" data-forecast-tone="${escapeHtml(forecast.tone)}">
+        <span class="cum-forecast-label" title="${escapeHtml(forecast.title)}">At this pace</span>
+        <strong>${escapeHtml(forecast.message)}</strong>
+      </div>
+    `;
   }
 
   function injectBarBesideComposer(composer, syncLayout = false) {

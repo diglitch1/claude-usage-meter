@@ -1,5 +1,6 @@
 (function () {
   const STORAGE_KEY = "claudeUsageMeterStateV2";
+  const USAGE_HISTORY_KEY = "claudeUsageMeterHistoryV1";
   const CONV_TOKENS_KEY = "conversationTokens";
   const CONVERSATION_TOKENS_UI_KEY = "conversationTokensUI";
   const ALARM_NAME = "refresh-usage";
@@ -11,6 +12,10 @@
   const MESSAGE_REFRESH_USAGE = "CUM_REFRESH_USAGE";
   const MESSAGE_ORG_ID_DETECTED = "CUM_ORG_ID_DETECTED";
   const MESSAGE_UPDATE_CONV_TOKENS = "CUM_UPDATE_CONV_TOKENS";
+  const MAX_USAGE_SAMPLES = 48;
+  const MIN_SAMPLE_INTERVAL_MS = 60 * 1000;
+  const MIN_FORECAST_SAMPLES = 3;
+  const MIN_FORECAST_SPAN_MS = 10 * 60 * 1000;
 
   const extensionApi =
     typeof browser !== "undefined"
@@ -213,6 +218,17 @@
     };
 
     if (normalized) {
+      const historyByOrg = await loadUsageHistory();
+      const currentSample = normalizeUsageSample({
+        timestamp: now,
+        percent: getRawFiveHourPercent(data, normalized.fiveHourPercent),
+        resetAt: normalized.fiveHourResetAt
+      });
+      const samples = appendUsageSample(historyByOrg[orgId], currentSample);
+      historyByOrg[orgId] = samples;
+      normalized.burnForecast = currentSample
+        ? calculateBurnForecast(samples, now, normalized.fiveHourResetAt)
+        : null;
       state.usage = Object.assign({}, state.usage || {}, normalized, {
         organizationId: orgId,
         source: "usage-api",
@@ -220,6 +236,7 @@
         updatedAt: now
       });
       storeUsageForOrg(state, orgId, state.usage);
+      await saveUsageHistory(historyByOrg);
     } else {
       state.usage = Object.assign(createStaleUsageForOrg(orgId, now), {
         lastError: "unparsed-usage-response",
@@ -367,6 +384,112 @@
 
   async function saveState(state) {
     await storageSet({ [STORAGE_KEY]: state });
+  }
+
+  async function loadUsageHistory() {
+    const result = await storageGet([USAGE_HISTORY_KEY]);
+    const stored = result && result[USAGE_HISTORY_KEY];
+    return stored && typeof stored === "object" ? stored : {};
+  }
+
+  async function saveUsageHistory(historyByOrg) {
+    await storageSet({ [USAGE_HISTORY_KEY]: historyByOrg });
+  }
+
+  function appendUsageSample(existingSamples, sample) {
+    const normalizedSample = normalizeUsageSample(sample);
+    if (!normalizedSample) {
+      return sanitizeUsageSamples(existingSamples).slice(-MAX_USAGE_SAMPLES);
+    }
+
+    const samples = sanitizeUsageSamples(existingSamples)
+      .filter((item) => item.resetAt === normalizedSample.resetAt)
+      .slice(-MAX_USAGE_SAMPLES);
+    const previous = samples[samples.length - 1];
+
+    if (previous && normalizedSample.timestamp <= previous.timestamp) {
+      return samples;
+    }
+    if (previous && normalizedSample.timestamp - previous.timestamp < MIN_SAMPLE_INTERVAL_MS) {
+      samples[samples.length - 1] = normalizedSample;
+      return samples;
+    }
+
+    samples.push(normalizedSample);
+    return samples.slice(-MAX_USAGE_SAMPLES);
+  }
+
+  function sanitizeUsageSamples(value) {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value
+      .map(normalizeUsageSample)
+      .filter(Boolean)
+      .sort((left, right) => left.timestamp - right.timestamp);
+  }
+
+  function normalizeUsageSample(value) {
+    const timestamp = Number(value && value.timestamp);
+    const percent = Number(value && value.percent);
+    const resetAt = Number(value && value.resetAt);
+    if (
+      !Number.isFinite(timestamp) ||
+      !Number.isFinite(percent) ||
+      !Number.isFinite(resetAt) ||
+      timestamp <= 0 ||
+      resetAt <= timestamp ||
+      percent < 0 ||
+      percent > 100
+    ) {
+      return null;
+    }
+
+    return { timestamp, percent, resetAt };
+  }
+
+  function getRawFiveHourPercent(data, fallback) {
+    const raw = Number(data && data.five_hour && data.five_hour.utilization);
+    return Number.isFinite(raw) ? raw : fallback;
+  }
+
+  function calculateBurnForecast(existingSamples, now = Date.now(), expectedResetAt = null) {
+    const resetAt = Number(expectedResetAt);
+    const samples = sanitizeUsageSamples(existingSamples).filter((sample) =>
+      (!Number.isFinite(resetAt) || sample.resetAt === resetAt) && sample.timestamp <= now
+    );
+    if (samples.length < MIN_FORECAST_SAMPLES) {
+      return null;
+    }
+
+    const recent = samples.slice(-MAX_USAGE_SAMPLES);
+    const first = recent[0];
+    const last = recent[recent.length - 1];
+    const spanMs = last.timestamp - first.timestamp;
+    const percentDelta = last.percent - first.percent;
+    const hasDecrease = recent.some((sample, index) =>
+      index > 0 && sample.percent < recent[index - 1].percent
+    );
+    if (spanMs < MIN_FORECAST_SPAN_MS || percentDelta < 0.5 || hasDecrease) {
+      return null;
+    }
+
+    const percentPerMs = percentDelta / spanMs;
+    const estimatedLimitAt = last.percent >= 100
+      ? last.timestamp
+      : last.timestamp + (100 - last.percent) / percentPerMs;
+    const activeResetAt = Number.isFinite(resetAt) ? resetAt : last.resetAt;
+
+    return {
+      calculatedAt: now,
+      estimatedLimitAt: Math.round(estimatedLimitAt),
+      observedMinutes: Math.round(spanMs / 60000),
+      percentPerHour: Math.round(percentPerMs * 60 * 60 * 1000 * 10) / 10,
+      resetAt: activeResetAt,
+      sampleCount: recent.length,
+      willHitBeforeReset: estimatedLimitAt <= activeResetAt
+    };
   }
 
   function getUsageForOrg(state, orgId) {
@@ -828,6 +951,11 @@
     const hours = Math.floor(minutesTotal / 60);
     const minutes = minutesTotal % 60;
 
+    if (hours >= 24) {
+      const days = Math.floor(hours / 24);
+      const remainingHours = hours % 24;
+      return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
+    }
     if (hours > 0) {
       return `${hours}h ${minutes}m`;
     }
@@ -895,6 +1023,8 @@
       normalizePlanName,
       extractPlanFromOrganizationRecord,
       normalizeConversationId,
+      appendUsageSample,
+      calculateBurnForecast,
       CONV_FETCH_INTERVAL_MS,
       CONTEXT_LIMIT
     };

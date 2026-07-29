@@ -11,6 +11,7 @@ It shows:
 
 - Current 5-hour/session usage percentage and reset timing.
 - Expandable five-hour, weekly, and extra-usage details when Claude provides them.
+- A cautious five-hour burn forecast after at least ten minutes of same-window samples.
 - Estimated current-conversation token count, clearly marked with `~`.
 - Usage freshness, stale/error feedback, and manual refresh.
 - Click-through to `https://claude.ai/settings/usage`.
@@ -39,6 +40,10 @@ No completion stream interception is used. The failed `webRequest` and injected
 
 The extension stores usage and token counts locally with `browser.storage.local`.
 It does not send data to any external service.
+
+The burn forecast also stays local. It needs multiple samples spanning at least
+ten minutes, resets its history when Claude starts a new five-hour window, and is
+presented as an estimate rather than a guaranteed limit time.
 
 ## Usage Sync Notes
 

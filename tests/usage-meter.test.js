@@ -419,6 +419,53 @@ test("background clears old active usage when a 200 response cannot be parsed", 
   assert.equal(state.usageFetch.stale, true);
 });
 
+test("burn forecast requires a stable trend from the current reset window", () => {
+  const harness = createBackgroundHarness(async () => ({ ok: false, status: 503 }));
+  const now = Date.parse("2026-07-29T12:00:00Z");
+  const resetAt = now + 2 * 60 * 60_000;
+  const samples = [
+    { timestamp: now - 20 * 60_000, percent: 10, resetAt },
+    { timestamp: now - 10 * 60_000, percent: 20, resetAt },
+    { timestamp: now, percent: 30, resetAt }
+  ];
+
+  const risk = harness.hooks.calculateBurnForecast(samples, now, resetAt);
+  assert.equal(risk.willHitBeforeReset, true);
+  assert.equal(risk.sampleCount, 3);
+  assert.equal(risk.observedMinutes, 20);
+  assert.equal(risk.percentPerHour, 60);
+  assert.equal(risk.estimatedLimitAt, now + 70 * 60_000);
+
+  const safe = harness.hooks.calculateBurnForecast(
+    samples.map((sample, index) => ({ ...sample, percent: 10 + index })),
+    now,
+    resetAt
+  );
+  assert.equal(safe.willHitBeforeReset, false);
+
+  assert.equal(harness.hooks.calculateBurnForecast(samples.slice(0, 2), now, resetAt), null);
+  assert.equal(
+    harness.hooks.calculateBurnForecast([
+      samples[0],
+      { ...samples[1], percent: 8 },
+      samples[2]
+    ], now, resetAt),
+    null
+  );
+
+  const nextResetAt = resetAt + 5 * 60 * 60_000;
+  const nextWindow = harness.hooks.appendUsageSample(samples, {
+    timestamp: now + 60_000,
+    percent: 1,
+    resetAt: nextResetAt
+  });
+  assert.deepEqual(clone(Array.from(nextWindow)), [{
+    timestamp: now + 60_000,
+    percent: 1,
+    resetAt: nextResetAt
+  }]);
+});
+
 test("content shows only an explicitly marked conversation token estimate", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
   const backgroundSource = fs.readFileSync(path.join(ROOT, "src/background.js"), "utf8");
@@ -533,6 +580,44 @@ test("meter builds expandable five-hour, weekly, and extra-usage details", () =>
   assert.match(source, />Claude settings<\/a>/);
   assert.match(styles, /\.cum-details\s*{/);
   assert.match(styles, /bottom:\s*calc\(100% \+ 8px\)/);
+});
+
+test("meter explains when a burn forecast is collecting data or predicts a limit", () => {
+  const harness = createContentLifecycleHarness();
+  const now = Date.parse("2026-07-29T12:00:00Z");
+  const waiting = harness.hooks.buildBurnForecastPresentation(null, now);
+  assert.equal(waiting.message, "—");
+  assert.match(waiting.title, /whether your current 5-hour usage pace/);
+  assert.match(waiting.title, /dash means there has not been enough usage change/);
+
+  const risk = harness.hooks.buildBurnForecastPresentation({
+    calculatedAt: now,
+    estimatedLimitAt: now + 2 * 60 * 60_000,
+    observedMinutes: 20,
+    percentPerHour: 30,
+    sampleCount: 8,
+    willHitBeforeReset: true
+  }, now);
+  assert.equal(risk.tone, "risk");
+  assert.match(risk.message, /limit in about 2h 0m/);
+  assert.match(risk.title, /Based on 8 samples/);
+
+  const safe = harness.hooks.buildBurnForecastPresentation({
+    calculatedAt: now,
+    estimatedLimitAt: now + 8 * 60 * 60_000,
+    observedMinutes: 20,
+    percentPerHour: 4,
+    sampleCount: 8,
+    willHitBeforeReset: false
+  }, now);
+  assert.equal(safe.tone, "safe");
+  assert.match(safe.message, /below the limit until reset/);
+
+  const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+  const styles = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
+  assert.match(source, /class="cum-forecast"/);
+  assert.match(styles, /data-forecast-tone="risk"/);
+  assert.match(styles, /\.cum-section\[title\][\s\S]*cursor:\s*help/);
 });
 
 test("another Claude tab cannot hide the current conversation token estimate", () => {
