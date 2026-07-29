@@ -12,9 +12,24 @@ It shows:
 - Current 5-hour/session usage percentage and reset timing.
 - Expandable five-hour, weekly, and extra-usage details when Claude provides them.
 - A cautious five-hour burn forecast after at least ten minutes of same-window samples.
+- Persistent Auto, Light, and Dark meter themes; Auto follows Claude's page appearance.
 - Estimated current-conversation token count, clearly marked with `~`.
 - Usage freshness, stale/error feedback, and manual refresh.
 - Click-through to `https://claude.ai/settings/usage`.
+
+## Theme Colors
+
+Auto uses the Light or Dark palette based on Claude's current page appearance.
+The accent changes with five-hour usage: Low is below 50%, Medium is 50–84%,
+and High is 85% or above.
+
+![Light and dark usage color swatches](docs/theme-colors.svg)
+
+| Usage level | Light theme | Dark theme |
+| --- | --- | --- |
+| Low | `#CA8A04` | `#FACC15` |
+| Medium | `#C2410C` | `#FD5602` |
+| High | `#B91C1C` | `#EF4444` |
 
 ## How It Works
 

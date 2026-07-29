@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="224" viewBox="0 0 720 224" role="img" aria-labelledby="title description">
+  <title id="title">Claude Usage Meter theme colors</title>
+  <desc id="description">Light and dark theme swatches for low, medium, and high usage.</desc>
+  <style>
+    .heading { fill: #34322d; font: 600 15px system-ui, sans-serif; }
+    .label { fill: #625f57; font: 600 14px system-ui, sans-serif; }
+    .hex-light { fill: #ffffff; font: 600 14px ui-monospace, monospace; }
+    .hex-dark { fill: #24231f; font: 700 14px ui-monospace, monospace; }
+  </style>
+
+  <rect width="720" height="224" rx="14" fill="#f7f6f2"/>
+  <text class="heading" x="112" y="26">Usage</text>
+  <text class="heading" x="226" y="26">Light theme</text>
+  <text class="heading" x="474" y="26">Dark theme</text>
+
+  <text class="label" x="112" y="70">Low · &lt;50%</text>
+  <rect x="220" y="44" width="210" height="40" rx="10" fill="#CA8A04"/>
+  <text class="hex-light" x="282" y="69">#CA8A04</text>
+  <rect x="468" y="44" width="210" height="40" rx="10" fill="#FACC15"/>
+  <text class="hex-dark" x="530" y="69">#FACC15</text>
+
+  <text class="label" x="64" y="126">Medium · 50–84%</text>
+  <rect x="220" y="100" width="210" height="40" rx="10" fill="#C2410C"/>
+  <text class="hex-light" x="282" y="125">#C2410C</text>
+  <rect x="468" y="100" width="210" height="40" rx="10" fill="#FD5602"/>
+  <text class="hex-light" x="530" y="125">#FD5602</text>
+
+  <text class="label" x="76" y="182">High · 85–100%</text>
+  <rect x="220" y="156" width="210" height="40" rx="10" fill="#B91C1C"/>
+  <text class="hex-light" x="282" y="181">#B91C1C</text>
+  <rect x="468" y="156" width="210" height="40" rx="10" fill="#EF4444"/>
+  <text class="hex-light" x="530" y="181">#EF4444</text>
+</svg>

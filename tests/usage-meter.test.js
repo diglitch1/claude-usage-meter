@@ -620,6 +620,25 @@ test("meter explains when a burn forecast is collecting data or predicts a limit
   assert.match(styles, /\.cum-section\[title\][\s\S]*cursor:\s*help/);
 });
 
+test("meter offers persistent auto, light, and dark theme choices", () => {
+  const harness = createContentLifecycleHarness();
+
+  assert.equal(harness.hooks.normalizeThemePreference("LIGHT"), "light");
+  assert.equal(harness.hooks.normalizeThemePreference("dark"), "dark");
+  assert.equal(harness.hooks.normalizeThemePreference("unknown"), "auto");
+  assert.equal(harness.hooks.resolveThemePreference("light", "dark"), "light");
+  assert.equal(harness.hooks.resolveThemePreference("auto", "light"), "light");
+  assert.equal(harness.hooks.resolveThemePreference("auto", "dark"), "dark");
+
+  const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+  const styles = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
+  assert.match(source, /claudeUsageMeterTheme/);
+  assert.match(source, /data-cum-theme-choice/);
+  assert.match(source, /bar\.dataset\.theme/);
+  assert.match(styles, /data-theme="light"/);
+  assert.match(styles, /\.cum-theme-picker/);
+});
+
 test("another Claude tab cannot hide the current conversation token estimate", () => {
   const harness = createContentLifecycleHarness();
   const current = {

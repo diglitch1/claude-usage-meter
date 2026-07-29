@@ -10,15 +10,25 @@
   --cum-accent: #facc15;
   --cum-accent-soft: rgba(250, 204, 21, 0.14);
   --cum-progress: 0%;
+  --cum-icon: rgb(225, 223, 217);
+  --cum-risk: #fb923c;
+  --cum-safe: #86efac;
+  --cum-stale: #f59e0b;
+  --cum-error: #ef4444;
+  --cum-control-bg: rgba(255, 255, 255, 0.06);
+  --cum-control-active: rgba(255, 255, 255, 0.16);
+  --cum-root-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  --cum-panel-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
   align-items: center;
   appearance: none;
   background: var(--cum-bg);
   backdrop-filter: blur(10px);
   border: 1px solid var(--cum-border);
   border-radius: var(--cum-composer-radius, 18px);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--cum-root-shadow);
   box-sizing: border-box;
   color: var(--cum-text);
+  color-scheme: dark;
   cursor: default;
   display: grid;
   font: 500 12px/1.15 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -35,6 +45,27 @@
   z-index: 30;
 }
 
+#claude-usage-meter-root[data-theme="light"] {
+  --cum-bg: rgba(248, 247, 243, 0.96);
+  --cum-bg-hover: rgba(242, 241, 236, 0.98);
+  --cum-expanded-bg: rgb(246, 245, 240);
+  --cum-border: rgba(35, 34, 31, 0.15);
+  --cum-divider: rgba(35, 34, 31, 0.11);
+  --cum-text: rgb(48, 47, 43);
+  --cum-muted: rgb(105, 102, 95);
+  --cum-track: rgba(35, 34, 31, 0.11);
+  --cum-icon: rgb(83, 80, 74);
+  --cum-risk: #c2410c;
+  --cum-safe: #15803d;
+  --cum-stale: #b45309;
+  --cum-error: #b91c1c;
+  --cum-control-bg: rgba(35, 34, 31, 0.05);
+  --cum-control-active: rgba(35, 34, 31, 0.13);
+  --cum-root-shadow: 0 3px 12px rgba(35, 34, 31, 0.12);
+  --cum-panel-shadow: 0 9px 24px rgba(35, 34, 31, 0.16);
+  color-scheme: light;
+}
+
 #claude-usage-meter-root[data-usage-tone="low"] {
   --cum-accent: #facc15;
   --cum-accent-soft: rgba(250, 204, 21, 0.16);
@@ -48,6 +79,21 @@
 #claude-usage-meter-root[data-usage-tone="high"] {
   --cum-accent: #ef4444;
   --cum-accent-soft: rgba(239, 68, 68, 0.16);
+}
+
+#claude-usage-meter-root[data-theme="light"][data-usage-tone="low"] {
+  --cum-accent: #ca8a04;
+  --cum-accent-soft: rgba(202, 138, 4, 0.14);
+}
+
+#claude-usage-meter-root[data-theme="light"][data-usage-tone="medium"] {
+  --cum-accent: #c2410c;
+  --cum-accent-soft: rgba(194, 65, 12, 0.14);
+}
+
+#claude-usage-meter-root[data-theme="light"][data-usage-tone="high"] {
+  --cum-accent: #b91c1c;
+  --cum-accent-soft: rgba(185, 28, 28, 0.14);
 }
 
 #claude-usage-meter-root:hover,
@@ -165,7 +211,7 @@
 }
 
 #claude-usage-meter-root .cum-icon {
-  color: rgb(225, 223, 217);
+  color: var(--cum-icon);
   display: inline-flex;
   flex: 0 0 auto;
   height: 16px;
@@ -203,11 +249,11 @@
 }
 
 #claude-usage-meter-root[data-sync-state="stale"] .cum-refresh {
-  color: #f59e0b;
+  color: var(--cum-stale);
 }
 
 #claude-usage-meter-root[data-sync-state="error"] .cum-refresh {
-  color: #ef4444;
+  color: var(--cum-error);
 }
 
 #claude-usage-meter-root[data-sync-state="loading"] .cum-refresh {
@@ -229,7 +275,7 @@
   border: 1px solid var(--cum-border);
   border-radius: var(--cum-composer-radius, 18px);
   bottom: calc(100% + 6px);
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.24);
+  box-shadow: var(--cum-panel-shadow);
   box-sizing: border-box;
   color: var(--cum-text);
   cursor: default;
@@ -330,11 +376,52 @@
 }
 
 #claude-usage-meter-root .cum-forecast[data-forecast-tone="risk"] strong {
-  color: #fb923c;
+  color: var(--cum-risk);
 }
 
 #claude-usage-meter-root .cum-forecast[data-forecast-tone="safe"] strong {
-  color: #86efac;
+  color: var(--cum-safe);
+}
+
+#claude-usage-meter-root .cum-theme-row {
+  align-items: center;
+  border-top: 1px solid var(--cum-divider);
+  color: var(--cum-muted);
+  display: flex;
+  justify-content: space-between;
+  margin-top: 7px;
+  padding-top: 8px;
+}
+
+#claude-usage-meter-root .cum-theme-picker {
+  background: var(--cum-control-bg);
+  border: 1px solid var(--cum-divider);
+  border-radius: 999px;
+  display: inline-flex;
+  padding: 2px;
+}
+
+#claude-usage-meter-root .cum-theme-picker button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: var(--cum-muted);
+  cursor: pointer;
+  font: inherit;
+  min-height: 24px;
+  padding: 0 9px;
+}
+
+#claude-usage-meter-root .cum-theme-picker button[aria-pressed="true"] {
+  background: var(--cum-control-active);
+  color: var(--cum-text);
+  font-weight: 650;
+}
+
+#claude-usage-meter-root .cum-theme-picker button:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--cum-accent);
+  outline: none;
 }
 
 [data-cum-meter-compact-host="true"] {

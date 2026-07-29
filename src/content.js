@@ -4,6 +4,7 @@
   const STORAGE_KEY = "claudeUsageMeterStateV2";
   const LEGACY_STORAGE_KEY = "claudeUsageMeterStateV1";
   const CONVERSATION_TOKENS_UI_KEY = "conversationTokensUI";
+  const THEME_KEY = "claudeUsageMeterTheme";
   const SETTINGS_URL = "https://claude.ai/settings/usage";
   const MESSAGE_REFRESH_USAGE = "CUM_REFRESH_USAGE";
   const MESSAGE_ORG_ID_DETECTED = "CUM_ORG_ID_DETECTED";
@@ -92,6 +93,7 @@
   let didScanInlinePlan = false;
   let usageRefreshPending = false;
   let detailsOpen = false;
+  let themePreference = "auto";
 
   const contentTestMode =
     typeof globalThis !== "undefined" && Boolean(globalThis.__CUM_CONTENT_TEST__);
@@ -109,7 +111,9 @@
       formatLastUpdatedAt,
       buildUsageDetails,
       formatDuration,
-      buildBurnForecastPresentation
+      buildBurnForecastPresentation,
+      normalizeThemePreference,
+      resolveThemePreference
     };
   } else {
     init();
@@ -150,10 +154,16 @@
     let conversationTokensUI = null;
 
     try {
-      const result = await extensionStorage.get([STORAGE_KEY, LEGACY_STORAGE_KEY, CONVERSATION_TOKENS_UI_KEY]);
+      const result = await extensionStorage.get([
+        STORAGE_KEY,
+        LEGACY_STORAGE_KEY,
+        CONVERSATION_TOKENS_UI_KEY,
+        THEME_KEY
+      ]);
       stored = result && result[STORAGE_KEY];
       legacy = result && result[LEGACY_STORAGE_KEY];
       conversationTokensUI = normalizeConversationTokensUI(result && result[CONVERSATION_TOKENS_UI_KEY]);
+      themePreference = normalizeThemePreference(result && result[THEME_KEY]);
     } catch (_error) {
       stored = null;
     }
@@ -221,9 +231,14 @@
     let stored = null;
     let conversationTokensUI = null;
     try {
-      const result = await extensionStorage.get([STORAGE_KEY, CONVERSATION_TOKENS_UI_KEY]);
+      const result = await extensionStorage.get([STORAGE_KEY, CONVERSATION_TOKENS_UI_KEY, THEME_KEY]);
       stored = result && result[STORAGE_KEY];
       conversationTokensUI = normalizeConversationTokensUI(result && result[CONVERSATION_TOKENS_UI_KEY]);
+      const incomingTheme = normalizeThemePreference(result && result[THEME_KEY]);
+      if (incomingTheme !== themePreference) {
+        themePreference = incomingTheme;
+        scheduleUpdate({});
+      }
     } catch (_error) {
       stored = null;
     }
@@ -1014,6 +1029,77 @@
     };
   }
 
+  function normalizeThemePreference(value) {
+    const theme = String(value || "").trim().toLowerCase();
+    return theme === "light" || theme === "dark" ? theme : "auto";
+  }
+
+  function resolveThemePreference(value, detectedTheme) {
+    const preference = normalizeThemePreference(value);
+    if (preference !== "auto") {
+      return preference;
+    }
+
+    const pageTheme = normalizeThemePreference(detectedTheme || detectClaudeTheme());
+    return pageTheme === "auto" ? "dark" : pageTheme;
+  }
+
+  function detectClaudeTheme() {
+    const html = document.documentElement;
+    const body = document.body;
+    const hints = [html, body]
+      .filter(Boolean)
+      .map((node) => `${node.getAttribute && node.getAttribute("data-theme") || ""} ${node.className || ""}`)
+      .join(" ");
+    if (/(?:^|[\s_-])dark(?:$|[\s_-])/i.test(hints)) {
+      return "dark";
+    }
+    if (/(?:^|[\s_-])light(?:$|[\s_-])/i.test(hints)) {
+      return "light";
+    }
+
+    if (window.getComputedStyle) {
+      for (const node of [body, html]) {
+        if (!node) {
+          continue;
+        }
+        const color = parseCssColor(window.getComputedStyle(node).backgroundColor);
+        if (color && color.alpha > 0.1) {
+          const luminance = color.red * 0.2126 + color.green * 0.7152 + color.blue * 0.0722;
+          return luminance >= 150 ? "light" : "dark";
+        }
+      }
+    }
+
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+      ? "light"
+      : "dark";
+  }
+
+  function parseCssColor(value) {
+    const match = String(value || "").match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)/i);
+    if (!match) {
+      return null;
+    }
+    return {
+      red: Number(match[1]),
+      green: Number(match[2]),
+      blue: Number(match[3]),
+      alpha: match[4] === undefined ? 1 : Number(match[4])
+    };
+  }
+
+  function setThemePreference(value) {
+    const nextTheme = normalizeThemePreference(value);
+    if (nextTheme === themePreference) {
+      return;
+    }
+
+    themePreference = nextTheme;
+    extensionStorage.set({ [THEME_KEY]: nextTheme }).catch(() => {});
+    renderBar(buildUsageState());
+  }
+
   function getClaudeUsageData() {
     // TODO: replace this adapter if Claude exposes a stable first-party usage API.
     const usage = state.usage;
@@ -1187,8 +1273,10 @@
       : "";
     const detailsHtml = renderUsageDetails(usageState.details);
     const forecastHtml = renderBurnForecast(usageState.forecast);
+    const themePickerHtml = renderThemePicker(themePreference);
 
     bar.dataset.usageTone = tone;
+    bar.dataset.theme = resolveThemePreference(themePreference);
     bar.dataset.hasTokens = tokenText ? "true" : "false";
     bar.dataset.syncState = usageState.syncState;
     bar.dataset.detailsOpen = detailsOpen ? "true" : "false";
@@ -1222,6 +1310,7 @@
         </div>
         ${detailsHtml}
         ${forecastHtml}
+        ${themePickerHtml}
       </div>
     `;
 
@@ -1255,6 +1344,20 @@
       <div class="cum-forecast" data-forecast-tone="${escapeHtml(forecast.tone)}">
         <span class="cum-forecast-label" title="${escapeHtml(forecast.title)}">At this pace</span>
         <strong>${escapeHtml(forecast.message)}</strong>
+      </div>
+    `;
+  }
+
+  function renderThemePicker(preference) {
+    const selected = normalizeThemePreference(preference);
+    return `
+      <div class="cum-theme-row">
+        <span>Theme</span>
+        <div class="cum-theme-picker" role="group" aria-label="Meter theme">
+          ${["auto", "light", "dark"].map((theme) => `
+            <button type="button" data-cum-theme-choice="${theme}" aria-pressed="${selected === theme ? "true" : "false"}" title="Use ${theme} meter theme">${theme[0].toUpperCase()}${theme.slice(1)}</button>
+          `).join("")}
+        </div>
       </div>
     `;
   }
@@ -1305,6 +1408,16 @@
   }
 
   function handleBarClick(event) {
+    const themeButton = event.target && event.target.closest
+      ? event.target.closest("[data-cum-theme-choice]")
+      : null;
+    if (themeButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      setThemePreference(themeButton.getAttribute("data-cum-theme-choice"));
+      return;
+    }
+
     const refreshButton = event.target && event.target.closest
       ? event.target.closest(".cum-refresh")
       : null;
