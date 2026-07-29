@@ -1,4 +1,26 @@
 (function () {
+  const shared = globalThis.CUM_SHARED;
+  if (!shared) {
+    return;
+  }
+
+  const {
+    asObject,
+    coercePercent,
+    createStaleUsageForOrg,
+    createStorageArea,
+    createUsage,
+    firstPlanName,
+    formatDuration,
+    getDayKey,
+    getErrorMessage,
+    getUsageForOrg,
+    normalizeConversationId,
+    normalizeOrgId,
+    normalizePlanName,
+    storeUsageForOrg
+  } = shared;
+
   const STORAGE_KEY = "claudeUsageMeterStateV2";
   const USAGE_HISTORY_KEY = "claudeUsageMeterHistoryV1";
   const CONV_TOKENS_KEY = "conversationTokens";
@@ -7,8 +29,6 @@
   const NORMAL_PERIOD_MINUTES = 1.5;
   const BACKOFF_PERIOD_MINUTES = 5;
   const FAILURE_BACKOFF_THRESHOLD = 2;
-  const CONTEXT_LIMIT = 200000;
-  const CONV_FETCH_INTERVAL_MS = 15000;
   const MESSAGE_REFRESH_USAGE = "CUM_REFRESH_USAGE";
   const MESSAGE_ORG_ID_DETECTED = "CUM_ORG_ID_DETECTED";
   const MESSAGE_UPDATE_CONV_TOKENS = "CUM_UPDATE_CONV_TOKENS";
@@ -16,6 +36,10 @@
   const MIN_SAMPLE_INTERVAL_MS = 60 * 1000;
   const MIN_FORECAST_SAMPLES = 3;
   const MIN_FORECAST_SPAN_MS = 10 * 60 * 1000;
+  const API_HEADERS = {
+    "anthropic-client-platform": "web_claude_ai",
+    "content-type": "application/json"
+  };
 
   const extensionApi =
     typeof browser !== "undefined"
@@ -24,10 +48,11 @@
         ? chrome
         : null;
   const usesPromiseRuntime = typeof browser !== "undefined" && extensionApi === browser;
+  const storage = createStorageArea(extensionApi);
 
   let refreshInFlight = null;
 
-  if (!extensionApi || !extensionApi.storage || !extensionApi.storage.local) {
+  if (!storage) {
     return;
   }
 
@@ -43,22 +68,22 @@
       });
     }
 
-    if (extensionApi.runtime && extensionApi.runtime.onInstalled) {
-      extensionApi.runtime.onInstalled.addListener(() => {
-        ensureAlarm(NORMAL_PERIOD_MINUTES).catch(() => {});
-        refreshUsage({ reason: "installed" }).catch(() => {});
-      });
+    const runtime = extensionApi.runtime;
+    if (!runtime) {
+      return;
     }
 
-    if (extensionApi.runtime && extensionApi.runtime.onStartup) {
-      extensionApi.runtime.onStartup.addListener(() => {
-        ensureAlarm(NORMAL_PERIOD_MINUTES).catch(() => {});
-        refreshUsage({ reason: "startup" }).catch(() => {});
-      });
-    }
+    ["onInstalled", "onStartup"].forEach((eventName) => {
+      if (runtime[eventName]) {
+        runtime[eventName].addListener(() => {
+          ensureAlarm(NORMAL_PERIOD_MINUTES).catch(() => {});
+          refreshUsage({ reason: eventName === "onInstalled" ? "installed" : "startup" }).catch(() => {});
+        });
+      }
+    });
 
-    if (extensionApi.runtime && extensionApi.runtime.onMessage) {
-      extensionApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (runtime.onMessage) {
+      runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const response = handleMessage(message);
         if (!response) {
           return false;
@@ -149,15 +174,8 @@
     }
 
     try {
-      const res = await fetch(
-        `https://claude.ai/api/organizations/${encodeURIComponent(orgId)}/usage`,
-        {
-          credentials: "include",
-          headers: {
-            "anthropic-client-platform": "web_claude_ai",
-            "content-type": "application/json"
-          }
-        }
+      const res = await apiFetch(
+        `/api/organizations/${encodeURIComponent(orgId)}/usage`
       );
 
       if (!res.ok) {
@@ -196,7 +214,7 @@
   async function markUsageSuccess({ data, detectedPlan, orgId, reason }) {
     const now = Date.now();
     const state = await loadState();
-    rollDayIfNeeded(state, now);
+    state.day = getDayKey(now);
 
     const normalized = normalizeUsageResponse(
       data,
@@ -235,8 +253,7 @@
         stale: false,
         updatedAt: now
       });
-      storeUsageForOrg(state, orgId, state.usage);
-      await saveUsageHistory(historyByOrg);
+      await storageSet({ [USAGE_HISTORY_KEY]: historyByOrg });
     } else {
       state.usage = Object.assign(createStaleUsageForOrg(orgId, now), {
         lastError: "unparsed-usage-response",
@@ -244,9 +261,9 @@
         source: "usage-api",
         stale: true
       });
-      storeUsageForOrg(state, orgId, state.usage);
     }
 
+    storeUsageForOrg(state, orgId, state.usage);
     await saveState(state);
     await ensureAlarm(NORMAL_PERIOD_MINUTES);
     return {
@@ -316,21 +333,20 @@
   async function saveDetectedOrgId(orgId) {
     const state = await loadState();
     if (state.organizationId !== orgId) {
-      const now = Date.now();
       state.organizationId = orgId;
-      state.usage = getUsageForOrg(state, orgId) || createStaleUsageForOrg(orgId, now);
+      state.usage = getUsageForOrg(state, orgId) || createStaleUsageForOrg(orgId, Date.now());
       await saveState(state);
     }
     return { ok: true, orgId, state };
   }
 
   function shouldSkipForBackoff(state, now, force) {
+    const usageFetch = state && state.usageFetch;
     if (
-      !state ||
-      !state.usageFetch ||
-      !state.usageFetch.stale ||
-      !Number.isFinite(state.usageFetch.nextAttemptAt) ||
-      state.usageFetch.nextAttemptAt <= now
+      !usageFetch ||
+      !usageFetch.stale ||
+      !Number.isFinite(usageFetch.nextAttemptAt) ||
+      usageFetch.nextAttemptAt <= now
     ) {
       return false;
     }
@@ -340,14 +356,13 @@
     }
 
     return (
-      state.usageFetch.status === "cloudflare-challenge" ||
-      (Number(state.usageFetch.failureCount) || 0) >= FAILURE_BACKOFF_THRESHOLD
+      usageFetch.status === "cloudflare-challenge" ||
+      (Number(usageFetch.failureCount) || 0) >= FAILURE_BACKOFF_THRESHOLD
     );
   }
 
   async function loadState() {
-    const result = await storageGet([STORAGE_KEY]);
-    const stored = result && result[STORAGE_KEY];
+    const stored = (await storageGet([STORAGE_KEY]))[STORAGE_KEY];
     const state = createDefaultState();
 
     if (stored && typeof stored.day === "string") {
@@ -359,41 +374,26 @@
     if (stored && stored.usageFetch && typeof stored.usageFetch === "object") {
       state.usageFetch = stored.usageFetch;
     }
-    state.usage = Object.assign({}, state.usage, (stored && stored.usage) || {});
-    state.usageByOrg = stored && stored.usageByOrg && typeof stored.usageByOrg === "object"
-      ? stored.usageByOrg
-      : {};
+    state.usage = Object.assign(state.usage, (stored && stored.usage) || {});
+    state.usageByOrg = Object.assign({}, asObject(stored && stored.usageByOrg));
     return state;
   }
 
   function createDefaultState() {
     return {
-      day: getDayKey(Date.now()),
-      usage: {
-        windowLabel: "5h",
-        plan: "",
-        usagePercent: null,
-        resetText: "",
-        resetAt: null,
-        updatedAt: 0
-      },
+      day: getDayKey(),
+      usage: createUsage(),
       usageByOrg: {},
       usageFetch: null
     };
   }
 
-  async function saveState(state) {
-    await storageSet({ [STORAGE_KEY]: state });
+  function saveState(state) {
+    return storageSet({ [STORAGE_KEY]: state });
   }
 
   async function loadUsageHistory() {
-    const result = await storageGet([USAGE_HISTORY_KEY]);
-    const stored = result && result[USAGE_HISTORY_KEY];
-    return stored && typeof stored === "object" ? stored : {};
-  }
-
-  async function saveUsageHistory(historyByOrg) {
-    await storageSet({ [USAGE_HISTORY_KEY]: historyByOrg });
+    return Object.assign({}, asObject((await storageGet([USAGE_HISTORY_KEY]))[USAGE_HISTORY_KEY]));
   }
 
   function appendUsageSample(existingSamples, sample) {
@@ -492,44 +492,8 @@
     };
   }
 
-  function getUsageForOrg(state, orgId) {
-    const normalized = normalizeOrgId(orgId);
-    if (!normalized || !state.usageByOrg || !state.usageByOrg[normalized]) {
-      return null;
-    }
-
-    return Object.assign({}, state.usageByOrg[normalized]);
-  }
-
-  function storeUsageForOrg(state, orgId, usage) {
-    const normalized = normalizeOrgId(orgId);
-    if (!normalized) {
-      return;
-    }
-
-    state.usageByOrg = state.usageByOrg && typeof state.usageByOrg === "object"
-      ? state.usageByOrg
-      : {};
-    state.usageByOrg[normalized] = Object.assign({}, usage, {
-      organizationId: normalized
-    });
-  }
-
-  function createStaleUsageForOrg(orgId, now) {
-    return {
-      organizationId: orgId,
-      windowLabel: "5h",
-      plan: "",
-      usagePercent: null,
-      resetText: "",
-      resetAt: null,
-      stale: true,
-      updatedAt: now
-    };
-  }
-
   async function ensureAlarm(periodMinutes) {
-    if (!extensionApi.alarms) {
+    if (!extensionApi.alarms || !extensionApi.alarms.create) {
       return;
     }
 
@@ -538,50 +502,42 @@
       return;
     }
 
-    await alarmCreate(ALARM_NAME, {
+    extensionApi.alarms.create(ALARM_NAME, {
       delayInMinutes: periodMinutes,
       periodInMinutes: periodMinutes
     });
   }
 
+  function apiFetch(path) {
+    return fetch(`https://claude.ai${path}`, {
+      credentials: "include",
+      headers: API_HEADERS
+    });
+  }
+
+  async function apiFetchJson(path) {
+    try {
+      const response = await apiFetch(path);
+      return response && response.ok ? await response.json() : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+
   async function fetchConversationTokens(orgId, conversationId) {
     const normalizedOrgId = normalizeOrgId(orgId);
     const normalizedConversationId = normalizeConversationId(conversationId);
-    if (!normalizedOrgId || !normalizedConversationId) {
-      return null;
-    }
-
-    const url =
-      `https://claude.ai/api/organizations/${encodeURIComponent(normalizedOrgId)}` +
-      `/chat_conversations/${encodeURIComponent(normalizedConversationId)}` +
-      "?tree=true&rendering_mode=messages&render_all_tools=true";
-
-    let response = null;
-    try {
-      response = await fetch(url, {
-        credentials: "include",
-        headers: {
-          "anthropic-client-platform": "web_claude_ai",
-          "content-type": "application/json"
-        }
-      });
-    } catch (_error) {
-      return null;
-    }
-
-    if (!response || !response.ok) {
-      return null;
-    }
-
-    let data = null;
-    try {
-      data = await response.json();
-    } catch (_error) {
-      return null;
-    }
-
     const countTokens = getTokenizerCounter();
-    if (!countTokens) {
+    if (!normalizedOrgId || !normalizedConversationId || !countTokens) {
+      return null;
+    }
+
+    const data = await apiFetchJson(
+      `/api/organizations/${encodeURIComponent(normalizedOrgId)}` +
+      `/chat_conversations/${encodeURIComponent(normalizedConversationId)}` +
+      "?tree=true&rendering_mode=messages&render_all_tools=true"
+    );
+    if (!data) {
       return null;
     }
 
@@ -603,11 +559,7 @@
       return null;
     }
 
-    const stored = await storageGet([CONV_TOKENS_KEY]);
-    const convState = stored && stored[CONV_TOKENS_KEY] && typeof stored[CONV_TOKENS_KEY] === "object"
-      ? stored[CONV_TOKENS_KEY]
-      : {};
-
+    const convState = asObject((await storageGet([CONV_TOKENS_KEY]))[CONV_TOKENS_KEY]);
     convState[normalizedConversationId] = tokenCount;
 
     const uiState = {
@@ -674,33 +626,30 @@
   }
 
   function getTokenizerCounter() {
-    if (typeof globalThis !== "undefined" && typeof globalThis.__gptTokenizerCount === "function") {
+    const tokenizer = globalThis.GPTTokenizer_o200k_base;
+    if (typeof globalThis.__gptTokenizerCount === "function") {
       return globalThis.__gptTokenizerCount;
     }
-    if (
-      typeof globalThis !== "undefined" &&
-      globalThis.GPTTokenizer_o200k_base &&
-      typeof globalThis.GPTTokenizer_o200k_base.countTokens === "function"
-    ) {
-      return globalThis.GPTTokenizer_o200k_base.countTokens.bind(globalThis.GPTTokenizer_o200k_base);
+    if (tokenizer && typeof tokenizer.countTokens === "function") {
+      return tokenizer.countTokens.bind(tokenizer);
     }
 
-    const encode = getTokenizerEncode();
+    const encode = typeof globalThis.__gptTokenizerEncode === "function"
+      ? globalThis.__gptTokenizerEncode
+      : tokenizer && typeof tokenizer.encode === "function"
+        ? tokenizer.encode
+        : null;
     return encode ? (text) => encode(text).length : null;
   }
 
-  function getTokenizerEncode() {
-    if (typeof globalThis !== "undefined" && typeof globalThis.__gptTokenizerEncode === "function") {
-      return globalThis.__gptTokenizerEncode;
-    }
-    if (
-      typeof globalThis !== "undefined" &&
-      globalThis.GPTTokenizer_o200k_base &&
-      typeof globalThis.GPTTokenizer_o200k_base.encode === "function"
-    ) {
-      return globalThis.GPTTokenizer_o200k_base.encode;
-    }
-    return null;
+  function readWindow(source) {
+    const resetAt = source && source.resets_at ? Date.parse(source.resets_at) : null;
+    return {
+      percent: source && Number.isFinite(source.utilization)
+        ? coercePercent(source.utilization)
+        : null,
+      resetAt: Number.isFinite(resetAt) ? resetAt : null
+    };
   }
 
   function normalizeUsageResponse(data, previousUsage, now, detectedPlan = "") {
@@ -708,39 +657,14 @@
       return null;
     }
 
-    const fiveHour = data.five_hour || null;
-    const sevenDay = data.seven_day || null;
-    const extraUsage = data.extra_usage || null;
+    const fiveHour = readWindow(data.five_hour);
+    const sevenDay = readWindow(data.seven_day);
+    const extra = readWindow(data.extra_usage);
+    const extraUsage = data.extra_usage || {};
 
-    const fiveHourPercent = fiveHour && Number.isFinite(fiveHour.utilization)
-      ? coercePercent(fiveHour.utilization)
-      : null;
-    const fiveHourResetAt = fiveHour && fiveHour.resets_at
-      ? Date.parse(fiveHour.resets_at)
-      : null;
-
-    const sevenDayPercent = sevenDay && Number.isFinite(sevenDay.utilization)
-      ? coercePercent(sevenDay.utilization)
-      : null;
-    const sevenDayResetAt = sevenDay && sevenDay.resets_at
-      ? Date.parse(sevenDay.resets_at)
-      : null;
-
-    const extraUsagePercent = extraUsage && Number.isFinite(extraUsage.utilization)
-      ? coercePercent(extraUsage.utilization)
-      : null;
-
-    if (
-      fiveHourPercent === null &&
-      sevenDayPercent === null &&
-      extraUsagePercent === null
-    ) {
+    if (fiveHour.percent === null && sevenDay.percent === null && extra.percent === null) {
       return null;
     }
-
-    const usagePercent = fiveHourPercent;
-    const resetAt = Number.isFinite(fiveHourResetAt) ? fiveHourResetAt : null;
-    const resetText = resetAt ? formatDuration(resetAt - now) : "";
 
     return {
       windowLabel: "5h",
@@ -748,28 +672,28 @@
         normalizePlanName(detectedPlan) ||
         extractPlanFromUsageResponse(data) ||
         normalizePlanName(previousUsage.plan),
-      usagePercent,
-      resetText,
-      resetAt,
-      fiveHourPercent,
-      fiveHourResetAt,
-      sevenDayPercent,
-      sevenDayResetAt,
-      extraUsagePercent,
-      extraUsageUsedCredits: extraUsage && Number.isFinite(extraUsage.used_credits)
+      usagePercent: fiveHour.percent,
+      resetText: fiveHour.resetAt ? formatDuration(fiveHour.resetAt - now) : "",
+      resetAt: fiveHour.resetAt,
+      fiveHourPercent: fiveHour.percent,
+      fiveHourResetAt: fiveHour.resetAt,
+      sevenDayPercent: sevenDay.percent,
+      sevenDayResetAt: sevenDay.resetAt,
+      extraUsagePercent: extra.percent,
+      extraUsageUsedCredits: Number.isFinite(extraUsage.used_credits)
         ? extraUsage.used_credits
         : null,
-      extraUsageMonthlyLimit: extraUsage && Number.isFinite(extraUsage.monthly_limit)
+      extraUsageMonthlyLimit: Number.isFinite(extraUsage.monthly_limit)
         ? extraUsage.monthly_limit
         : null,
-      extraUsageCurrency: extraUsage && typeof extraUsage.currency === "string"
+      extraUsageCurrency: typeof extraUsage.currency === "string"
         ? extraUsage.currency
         : null
     };
   }
 
   function extractPlanFromUsageResponse(data) {
-    const candidates = [
+    return firstPlanName([
       data.plan,
       data.plan_type,
       data.subscription_type,
@@ -778,48 +702,14 @@
       data.subscription && data.subscription.plan,
       data.organization && data.organization.plan,
       data.account && data.account.plan
-    ];
-
-    for (const candidate of candidates) {
-      const plan = normalizePlanName(candidate);
-      if (plan) {
-        return plan;
-      }
-    }
-
-    return "";
+    ]);
   }
 
   async function fetchOrganizationPlan(orgId) {
-    let response = null;
-    try {
-      response = await fetch("https://claude.ai/api/organizations", {
-        credentials: "include",
-        headers: {
-          "anthropic-client-platform": "web_claude_ai",
-          "content-type": "application/json"
-        }
-      });
-    } catch (_error) {
-      return "";
-    }
-
-    if (!response || !response.ok) {
-      return "";
-    }
-
-    let data = null;
-    try {
-      data = await response.json();
-    } catch (_error) {
-      return "";
-    }
-
+    const data = await apiFetchJson("/api/organizations");
     const records = Array.isArray(data)
       ? data
-      : data && Array.isArray(data.organizations)
-        ? data.organizations
-        : [];
+      : (data && Array.isArray(data.organizations) ? data.organizations : []);
     const record = records.find((item) => {
       if (!item || typeof item !== "object") {
         return false;
@@ -836,7 +726,7 @@
       return "";
     }
 
-    const candidates = [
+    return firstPlanName([
       record.plan,
       record.plan_type,
       record.subscription_type,
@@ -847,157 +737,19 @@
       record.subscription && record.subscription.plan,
       record.subscription && record.subscription.type,
       ...(Array.isArray(record.capabilities) ? record.capabilities : [])
-    ];
-
-    for (const candidate of candidates) {
-      const plan = normalizePlanName(candidate);
-      if (plan) {
-        return plan;
-      }
-    }
-
-    return "";
-  }
-
-  function normalizePlanName(value) {
-    const text = String(value || "")
-      .replace(/[_-]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!text) {
-      return "";
-    }
-
-    const maxMatch = text.match(/\bmax(?:\s+plan)?(?:\s+(5x|20x))?\b/i);
-    if (maxMatch) {
-      return maxMatch[1] ? `Max ${maxMatch[1].toLowerCase()}` : "Max";
-    }
-    if (/\benterprise\b/i.test(text)) {
-      return "Enterprise";
-    }
-    if (/\beducation\b|\bedu\b/i.test(text)) {
-      return "Education";
-    }
-    if (/\bteam\b/i.test(text)) {
-      return "Team";
-    }
-    if (/\bpro\b/i.test(text)) {
-      return "Pro";
-    }
-    if (/\bfree\b/i.test(text)) {
-      return "Free";
-    }
-    return "";
-  }
-
-  function normalizeOrgId(value) {
-    const text = String(value || "").trim();
-    const match =
-      text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i) ||
-      text.match(/\borg_[A-Za-z0-9_-]{8,}\b/) ||
-      text.match(/\b[A-Za-z0-9_-]{20,}\b/);
-    return match ? match[0] : "";
-  }
-
-  function normalizeConversationId(value) {
-    const text = String(value || "").trim();
-    const match =
-      text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i) ||
-      text.match(/\b[A-Za-z0-9_-]{12,}\b/);
-    return match ? match[0] : "";
-  }
-
-  function rollDayIfNeeded(state, now) {
-    const day = getDayKey(now);
-    if (state.day === day) {
-      return;
-    }
-
-    state.day = day;
-  }
-
-  function normalizeResetText(text) {
-    return String(text || "")
-      .trim()
-      .replace(/^resets?\s+/i, "")
-      .replace(/^in\s+/i, "")
-      .replace(/\bhours?\b|\bhrs?\b/gi, "h")
-      .replace(/\bminutes?\b|\bmins?\b/gi, "m")
-      .replace(/\s+/g, " ");
-  }
-
-  function parseDurationMs(text) {
-    let total = 0;
-    const pattern = /(\d+(?:\.\d+)?)\s*(d|day|days|h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b/gi;
-    let match;
-
-    while ((match = pattern.exec(String(text || "")))) {
-      const value = Number(match[1]);
-      const unit = match[2].toLowerCase();
-      if (unit.startsWith("d")) {
-        total += value * 24 * 60 * 60 * 1000;
-      } else if (unit.startsWith("h")) {
-        total += value * 60 * 60 * 1000;
-      } else {
-        total += value * 60 * 1000;
-      }
-    }
-
-    return total;
-  }
-
-  function formatDuration(milliseconds) {
-    const minutesTotal = Math.max(0, Math.round(milliseconds / 60000));
-    const hours = Math.floor(minutesTotal / 60);
-    const minutes = minutesTotal % 60;
-
-    if (hours >= 24) {
-      const days = Math.floor(hours / 24);
-      const remainingHours = hours % 24;
-      return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
-    }
-    if (hours > 0) {
-      return `${hours}h ${minutes}m`;
-    }
-    return `${minutes}m`;
-  }
-
-  function coercePercent(value) {
-    const number = Number(value);
-    if (!Number.isFinite(number)) {
-      return null;
-    }
-    return Math.max(0, Math.min(100, Math.round(number)));
-  }
-
-  function getDayKey(timestamp) {
-    const date = new Date(timestamp);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
-  }
-
-  function getErrorMessage(error) {
-    return error && error.message ? error.message : String(error || "unknown-error");
+    ]);
   }
 
   function storageGet(keys) {
-    if (usesPromiseRuntime) {
-      return extensionApi.storage.local.get(keys);
-    }
-    return new Promise((resolve) => extensionApi.storage.local.get(keys, resolve));
+    return storage.get(keys).then((result) => result || {});
   }
 
   function storageSet(value) {
-    if (usesPromiseRuntime) {
-      return extensionApi.storage.local.set(value);
-    }
-    return new Promise((resolve) => extensionApi.storage.local.set(value, resolve));
+    return storage.set(value);
   }
 
   function alarmGet(name) {
-    if (!extensionApi.alarms || !extensionApi.alarms.get) {
+    if (!extensionApi.alarms.get) {
       return Promise.resolve(null);
     }
     if (usesPromiseRuntime) {
@@ -1006,15 +758,7 @@
     return new Promise((resolve) => extensionApi.alarms.get(name, (alarm) => resolve(alarm || null)));
   }
 
-  function alarmCreate(name, options) {
-    if (!extensionApi.alarms || !extensionApi.alarms.create) {
-      return Promise.resolve();
-    }
-    extensionApi.alarms.create(name, options);
-    return Promise.resolve();
-  }
-
-  if (typeof globalThis !== "undefined" && globalThis.__CUM_TEST__) {
+  if (globalThis.__CUM_TEST__) {
     globalThis.__CUM_TEST_HOOKS__ = {
       fetchConversationTokens,
       updateConversationTokens,
@@ -1024,9 +768,7 @@
       extractPlanFromOrganizationRecord,
       normalizeConversationId,
       appendUsageSample,
-      calculateBurnForecast,
-      CONV_FETCH_INTERVAL_MS,
-      CONTEXT_LIMIT
+      calculateBurnForecast
     };
   }
 })();

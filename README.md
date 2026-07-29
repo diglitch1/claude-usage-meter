@@ -71,6 +71,7 @@ from the repository root:
 ```bash
 node --check src/background.js
 node --check src/content.js
+node --check src/lib/shared.js
 node --check src/lib/tokenizer.js
 node --test tests/usage-meter.test.js
 node -e "JSON.parse(require('node:fs').readFileSync('manifest.json','utf8'))"

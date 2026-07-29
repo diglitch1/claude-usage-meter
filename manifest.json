@@ -15,6 +15,7 @@
   ],
   "background": {
     "scripts": [
+      "src/lib/shared.js",
       "src/lib/tokenizer.js",
       "src/background.js"
     ]
@@ -26,6 +27,7 @@
         "https://www.claude.ai/*"
       ],
       "js": [
+        "src/lib/shared.js",
         "src/content.js"
       ],
       "css": [

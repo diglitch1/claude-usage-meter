@@ -1,4 +1,25 @@
 (function () {
+  const shared = globalThis.CUM_SHARED;
+  if (!shared) {
+    return;
+  }
+
+  const {
+    ORG_ID_SOURCE,
+    asObject,
+    coercePercent,
+    createStaleUsageForOrg,
+    createStorageArea,
+    createUsage,
+    findFirst,
+    formatDuration,
+    getDayKey,
+    getUsageForOrg,
+    normalizeOrgId,
+    normalizePlanName,
+    storeUsageForOrg
+  } = shared;
+
   const ROOT_ID = "claude-usage-meter-root";
   const DETAILS_ID = "claude-usage-meter-details";
   const STORAGE_KEY = "claudeUsageMeterStateV2";
@@ -10,7 +31,6 @@
   const MESSAGE_ORG_ID_DETECTED = "CUM_ORG_ID_DETECTED";
   const MESSAGE_UPDATE_CONV_TOKENS = "CUM_UPDATE_CONV_TOKENS";
 
-  const RENDER_NEUTRAL_PLACEHOLDERS = true;
   const UPDATE_DEBOUNCE_MS = 350;
   const DOM_POLL_MS = 3000;
   const ORG_SCAN_INTERVAL_MS = 3000;
@@ -21,6 +41,8 @@
   const USAGE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
   const COMPACT_LAYOUT_MAX_WIDTH = 820;
   const COMPACT_METER_RESERVE_PX = 48;
+  const COMPOSER_SELECTOR = "textarea,[contenteditable='true']";
+  const PLAN_KEY_PATTERN = /plan|subscription|billing|tier|capabilit/i;
 
   const ICONS = {
     clock:
@@ -34,18 +56,13 @@
   const fallbackStorage = {
     async get(keys) {
       try {
-        if (Array.isArray(keys)) {
-          return keys.reduce((result, key) => {
-            const raw = window.localStorage.getItem(key);
-            if (raw) {
-              result[key] = JSON.parse(raw);
-            }
-            return result;
-          }, {});
-        }
-
-        const raw = window.localStorage.getItem(keys);
-        return raw ? { [keys]: JSON.parse(raw) } : {};
+        return [].concat(keys).reduce((result, key) => {
+          const raw = window.localStorage.getItem(key);
+          if (raw) {
+            result[key] = JSON.parse(raw);
+          }
+          return result;
+        }, {});
       } catch (_error) {
         return {};
       }
@@ -61,19 +78,14 @@
     }
   };
 
-  const extensionStorage =
-    typeof browser !== "undefined" && browser.storage && browser.storage.local
-      ? browser.storage.local
-      : typeof chrome !== "undefined" && chrome.storage && chrome.storage.local
-        ? {
-            get(key) {
-              return new Promise((resolve) => chrome.storage.local.get(key, resolve));
-            },
-            set(value) {
-              return new Promise((resolve) => chrome.storage.local.set(value, resolve));
-            }
-          }
-        : fallbackStorage;
+  const extensionApi =
+    typeof browser !== "undefined"
+      ? browser
+      : typeof chrome !== "undefined"
+        ? chrome
+        : null;
+  const usesPromiseRuntime = typeof browser !== "undefined" && extensionApi === browser;
+  const extensionStorage = createStorageArea(extensionApi) || fallbackStorage;
 
   let state = createDefaultState();
   let bar = null;
@@ -95,10 +107,7 @@
   let detailsOpen = false;
   let themePreference = "auto";
 
-  const contentTestMode =
-    typeof globalThis !== "undefined" && Boolean(globalThis.__CUM_CONTENT_TEST__);
-
-  if (contentTestMode) {
+  if (globalThis.__CUM_CONTENT_TEST__) {
     globalThis.__CUM_CONTENT_TEST_HOOKS__ = {
       isComposerLikeBox,
       reconcileBarElement,
@@ -121,9 +130,8 @@
 
   async function init() {
     state = await loadState();
-    installStoragePolling();
-    detectAndPersistOrgId(true);
-    detectAndPersistPlan(true);
+    scheduleStoragePull();
+    rescanPage(true);
     requestBackgroundUsageRefresh("content-open", true);
     installDomPoller();
     installRouteAndViewportListeners();
@@ -133,50 +141,40 @@
   function createDefaultState() {
     return {
       day: getDayKey(),
-      usage: {
-        windowLabel: "5h",
-        plan: "",
-        usagePercent: null,
-        resetText: "",
-        resetAt: null,
-        updatedAt: 0
-      },
+      usage: createUsage(),
       usageByOrg: {},
       usageFetch: null,
       conversationTokensUI: null
     };
   }
 
-  async function loadState() {
-    const base = createDefaultState();
-    let stored = null;
-    let legacy = null;
-    let conversationTokensUI = null;
-
+  async function readStored(keys) {
     try {
-      const result = await extensionStorage.get([
-        STORAGE_KEY,
-        LEGACY_STORAGE_KEY,
-        CONVERSATION_TOKENS_UI_KEY,
-        THEME_KEY
-      ]);
-      stored = result && result[STORAGE_KEY];
-      legacy = result && result[LEGACY_STORAGE_KEY];
-      conversationTokensUI = normalizeConversationTokensUI(result && result[CONVERSATION_TOKENS_UI_KEY]);
-      themePreference = normalizeThemePreference(result && result[THEME_KEY]);
+      return (await extensionStorage.get(keys)) || {};
     } catch (_error) {
-      stored = null;
+      return {};
     }
+  }
 
-    const merged = migrateState(Object.assign(base, legacy || {}, stored || {}));
-    merged.conversationTokensUI = conversationTokensUI;
+  async function loadState() {
+    const result = await readStored([
+      STORAGE_KEY,
+      LEGACY_STORAGE_KEY,
+      CONVERSATION_TOKENS_UI_KEY,
+      THEME_KEY
+    ]);
+    themePreference = normalizeThemePreference(result[THEME_KEY]);
+
+    const merged = migrateState(
+      Object.assign(createDefaultState(), result[LEGACY_STORAGE_KEY] || {}, result[STORAGE_KEY] || {})
+    );
+    merged.conversationTokensUI = normalizeConversationTokensUI(result[CONVERSATION_TOKENS_UI_KEY]);
     rollDayIfNeeded(merged, false);
     return merged;
   }
 
   function migrateState(input) {
-    const base = createDefaultState();
-    const output = base;
+    const output = createDefaultState();
     const legacyUsage = (input && input.usage) || {};
 
     if (input && typeof input.day === "string") {
@@ -189,15 +187,13 @@
       output.usageFetch = input.usageFetch;
     }
 
-    output.usage = Object.assign(base.usage, legacyUsage, {
+    output.usage = Object.assign(output.usage, legacyUsage, {
       usagePercent: coercePercent(legacyUsage.usagePercent ?? legacyUsage.sessionPercent),
       resetText: legacyUsage.resetText || legacyUsage.sessionReset || "",
       plan: normalizePlanName(legacyUsage.plan),
       resetAt: Number.isFinite(legacyUsage.resetAt) ? legacyUsage.resetAt : null
     });
-    output.usageByOrg = input && input.usageByOrg && typeof input.usageByOrg === "object"
-      ? input.usageByOrg
-      : {};
+    output.usageByOrg = asObject(input && input.usageByOrg);
     output.conversationTokensUI = normalizeConversationTokensUI(input && input.conversationTokensUI);
 
     return output;
@@ -207,16 +203,16 @@
     window.clearTimeout(saveTimer);
     saveTimer = window.setTimeout(async () => {
       try {
-        await mergeLatestStoredStateBeforeSave();
+        const stored = await readStored([STORAGE_KEY]);
+        if (stored[STORAGE_KEY]) {
+          // Another tab may have synced newer usage while this save was queued.
+          mergeStoredUsageState(stored[STORAGE_KEY], true);
+        }
         await extensionStorage.set({ [STORAGE_KEY]: state });
       } catch (_error) {
         // Do not let storage failures affect Claude.
       }
     }, 250);
-  }
-
-  function installStoragePolling() {
-    scheduleStoragePull();
   }
 
   function scheduleStoragePull() {
@@ -228,29 +224,21 @@
   }
 
   async function pullStoredState() {
-    let stored = null;
-    let conversationTokensUI = null;
-    try {
-      const result = await extensionStorage.get([STORAGE_KEY, CONVERSATION_TOKENS_UI_KEY, THEME_KEY]);
-      stored = result && result[STORAGE_KEY];
-      conversationTokensUI = normalizeConversationTokensUI(result && result[CONVERSATION_TOKENS_UI_KEY]);
-      const incomingTheme = normalizeThemePreference(result && result[THEME_KEY]);
-      if (incomingTheme !== themePreference) {
-        themePreference = incomingTheme;
-        scheduleUpdate({});
-      }
-    } catch (_error) {
-      stored = null;
+    const result = await readStored([STORAGE_KEY, CONVERSATION_TOKENS_UI_KEY, THEME_KEY]);
+    const incomingTheme = normalizeThemePreference(result[THEME_KEY]);
+    if (incomingTheme !== themePreference) {
+      themePreference = incomingTheme;
+      scheduleUpdate({});
     }
 
     const beforeVersion = getUsageVersion(state);
     const beforeOrgId = state.organizationId || "";
     const beforeTokenText = getCurrentTokenEstimateText();
-    if (stored) {
-      mergeStoredUsageState(stored);
+    if (result[STORAGE_KEY]) {
+      mergeStoredUsageState(result[STORAGE_KEY]);
     }
     state.conversationTokensUI = selectConversationTokenState(
-      conversationTokensUI,
+      normalizeConversationTokensUI(result[CONVERSATION_TOKENS_UI_KEY]),
       state.conversationTokensUI,
       getConversationIdFromUrl()
     );
@@ -263,67 +251,32 @@
     }
   }
 
-  function mergeStoredUsageState(stored) {
+  function mergeStoredUsageState(stored, requireNewer = false) {
     const incoming = migrateState(stored);
     mergeUsageByOrg(incoming.usageByOrg);
+
     const incomingOrgId = incoming.organizationId || "";
     const activeOrgId = state.organizationId || incomingOrgId;
     const incomingUsageOrgId = (incoming.usage && incoming.usage.organizationId) || incomingOrgId;
     const usageMatchesActiveOrg = !incomingUsageOrgId || !activeOrgId || incomingUsageOrgId === activeOrgId;
+    const versionDelta = getUsageVersion(incoming) - getUsageVersion(state);
 
-    if (usageMatchesActiveOrg && getUsageVersion(incoming) >= getUsageVersion(state)) {
+    if (usageMatchesActiveOrg && (requireNewer ? versionDelta > 0 : versionDelta >= 0)) {
       state.usage = Object.assign({}, state.usage, incoming.usage || {});
       if (incoming.usageFetch) {
         state.usageFetch = incoming.usageFetch;
       }
     }
 
-    if (incoming.organizationId && !state.organizationId) {
-      state.organizationId = incoming.organizationId;
-    }
-  }
-
-  async function mergeLatestStoredStateBeforeSave() {
-    let stored = null;
-    try {
-      const result = await extensionStorage.get([STORAGE_KEY]);
-      stored = result && result[STORAGE_KEY];
-    } catch (_error) {
-      stored = null;
-    }
-
-    if (!stored) {
-      return;
-    }
-
-    const incoming = migrateState(stored);
-    mergeUsageByOrg(incoming.usageByOrg);
-    const incomingOrgId = incoming.organizationId || "";
-    const activeOrgId = state.organizationId || incomingOrgId;
-    const incomingUsageOrgId = (incoming.usage && incoming.usage.organizationId) || incomingOrgId;
-    const usageMatchesActiveOrg = !incomingUsageOrgId || !activeOrgId || incomingUsageOrgId === activeOrgId;
-
-    if (usageMatchesActiveOrg && getUsageVersion(incoming) > getUsageVersion(state)) {
-      state.usage = Object.assign({}, state.usage, incoming.usage || {});
-      if (incoming.usageFetch) {
-        state.usageFetch = incoming.usageFetch;
-      }
-    }
     if (incoming.organizationId && !state.organizationId) {
       state.organizationId = incoming.organizationId;
     }
   }
 
   function mergeUsageByOrg(incoming) {
-    if (!incoming || typeof incoming !== "object") {
-      return;
-    }
+    state.usageByOrg = asObject(state.usageByOrg);
 
-    state.usageByOrg = state.usageByOrg && typeof state.usageByOrg === "object"
-      ? state.usageByOrg
-      : {};
-
-    Object.entries(incoming).forEach(([orgId, usage]) => {
+    Object.entries(asObject(incoming)).forEach(([orgId, usage]) => {
       const normalized = normalizeOrgId(orgId);
       if (!normalized || !usage || typeof usage !== "object") {
         return;
@@ -331,9 +284,7 @@
 
       const existing = state.usageByOrg[normalized];
       if (!existing || getUsageVersion({ usage }) >= getUsageVersion({ usage: existing })) {
-        state.usageByOrg[normalized] = Object.assign({}, usage, {
-          organizationId: normalized
-        });
+        storeUsageForOrg(state, normalized, usage);
       }
     });
   }
@@ -365,12 +316,7 @@
       orgId,
       reason
     })
-      .then((response) => {
-        if (response && response.state) {
-          mergeStoredUsageState(response.state);
-          scheduleUpdate({});
-        }
-      })
+      .then(adoptResponseState)
       .catch(() => {
         // The content script still works without the optional background cache.
         return null;
@@ -379,6 +325,13 @@
         usageRefreshPending = false;
         scheduleUpdate({});
       });
+  }
+
+  function adoptResponseState(response) {
+    if (response && response.state) {
+      mergeStoredUsageState(response.state);
+      scheduleUpdate({});
+    }
   }
 
   function maybeRequestTokenUpdate() {
@@ -406,12 +359,14 @@
     })
       .then((response) => {
         const incoming = normalizeConversationTokensUI(response && response.conversationTokensUI);
-        if (incoming) {
-          const beforeTokenText = getCurrentTokenEstimateText();
-          state.conversationTokensUI = incoming;
-          if (beforeTokenText !== getCurrentTokenEstimateText()) {
-            scheduleUpdate({});
-          }
+        if (!incoming) {
+          return;
+        }
+
+        const beforeTokenText = getCurrentTokenEstimateText();
+        state.conversationTokensUI = incoming;
+        if (beforeTokenText !== getCurrentTokenEstimateText()) {
+          scheduleUpdate({});
         }
       })
       .catch(() => {
@@ -420,22 +375,28 @@
   }
 
   function sendRuntimeMessage(message) {
-    if (typeof browser !== "undefined" && browser.runtime && browser.runtime.sendMessage) {
-      return browser.runtime.sendMessage(message);
+    const runtime = extensionApi && extensionApi.runtime;
+    if (!runtime || !runtime.sendMessage) {
+      return Promise.resolve(null);
     }
-    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-      return new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage(message, (response) => {
-          const error = chrome.runtime.lastError;
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve(response);
-        });
+    if (usesPromiseRuntime) {
+      return runtime.sendMessage(message);
+    }
+    return new Promise((resolve, reject) => {
+      runtime.sendMessage(message, (response) => {
+        const error = runtime.lastError;
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(response);
       });
-    }
-    return Promise.resolve(null);
+    });
+  }
+
+  function rescanPage(force = false) {
+    detectAndPersistOrgId(force);
+    detectAndPersistPlan(force);
   }
 
   function detectAndPersistOrgId(force = false) {
@@ -457,9 +418,8 @@
       return false;
     }
 
-    const now = Date.now();
     state.organizationId = normalized;
-    state.usage = getUsageForOrg(normalized) || createStaleUsageForOrg(normalized, now);
+    state.usage = getUsageForOrg(state, normalized) || createStaleUsageForOrg(normalized, Date.now());
     scheduleSave();
     scheduleUpdate({});
 
@@ -467,12 +427,7 @@
       type: MESSAGE_ORG_ID_DETECTED,
       orgId: normalized
     })
-      .then((response) => {
-        if (response && response.state) {
-          mergeStoredUsageState(response.state);
-          scheduleUpdate({});
-        }
-      })
+      .then(adoptResponseState)
       .catch(() => {
         // The local state was already updated and will be persisted locally.
       });
@@ -483,28 +438,23 @@
   function detectAndPersistPlan(force = false) {
     const now = Date.now();
     const currentPlan = normalizePlanName(state.usage && state.usage.plan);
-    if (currentPlan && !force) {
-      return currentPlan;
-    }
-    if (!force && now < nextPlanScanAt) {
+    if ((currentPlan && !force) || (!force && now < nextPlanScanAt)) {
       return currentPlan;
     }
 
     nextPlanScanAt = now + PLAN_SCAN_INTERVAL_MS;
-    const detectedPlan =
+    const plan = normalizePlanName(
       detectPlanFromSettingsPage() ||
-      findPlanInWebStorage(window.localStorage) ||
-      findPlanInWebStorage(window.sessionStorage) ||
-      findPlanInInlineState();
-    const plan = normalizePlanName(detectedPlan);
+      findPlanInWebStorage(getWebStorage("localStorage")) ||
+      findPlanInWebStorage(getWebStorage("sessionStorage")) ||
+      findPlanInInlineState()
+    );
     if (!plan || plan === currentPlan) {
       return plan;
     }
 
     state.usage = Object.assign({}, state.usage, { plan });
-    if (state.organizationId) {
-      storeUsageForOrg(state.organizationId, state.usage);
-    }
+    storeUsageForOrg(state, state.organizationId, state.usage);
     scheduleSave();
     scheduleUpdate({});
     return plan;
@@ -518,72 +468,28 @@
   }
 
   function findPlanInWebStorage(storage) {
-    if (!storage) {
-      return "";
-    }
-
-    try {
-      for (let index = 0; index < storage.length; index += 1) {
-        const key = storage.key(index);
-        const raw = storage.getItem(key) || "";
-        if (!raw || !/plan|subscription|billing|tier|capabilit/i.test(raw)) {
-          continue;
-        }
-
-        try {
-          const plan = findPlanInValue(JSON.parse(raw));
-          if (plan) {
-            return plan;
-          }
-        } catch (_error) {
-          if (/plan|subscription|billing|tier/i.test(String(key || ""))) {
-            const plan = normalizePlanName(raw);
-            if (plan) {
-              return plan;
-            }
-          }
-        }
+    return eachStorageEntry(storage, (key, raw) => {
+      if (!PLAN_KEY_PATTERN.test(raw)) {
+        return "";
       }
-    } catch (_error) {
-      return "";
-    }
 
-    return "";
+      try {
+        return findPlanInValue(JSON.parse(raw));
+      } catch (_error) {
+        return PLAN_KEY_PATTERN.test(String(key || "")) ? normalizePlanName(raw) : "";
+      }
+    });
   }
 
-  function findPlanInValue(value, path = [], depth = 0) {
-    if (value == null || depth > 7) {
-      return "";
-    }
-
-    if (typeof value === "string") {
-      const hasPlanMetadataPath = path.some((key) =>
-        /plan|subscription|billing|tier|capabilit/i.test(String(key || ""))
-      );
-      return hasPlanMetadataPath ? normalizePlanName(value) : "";
-    }
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const plan = findPlanInValue(item, path, depth + 1);
-        if (plan) {
-          return plan;
-        }
-      }
-      return "";
-    }
-
-    if (typeof value !== "object") {
-      return "";
-    }
-
-    for (const [key, item] of Object.entries(value)) {
-      const plan = findPlanInValue(item, path.concat(key), depth + 1);
-      if (plan) {
-        return plan;
-      }
-    }
-    return "";
+  function findPlanInValue(value) {
+    return findInValue(
+      value,
+      (text, path) =>
+        path.some((key) => PLAN_KEY_PATTERN.test(String(key || "")))
+          ? normalizePlanName(text)
+          : "",
+      { maxDepth: 7 }
+    );
   }
 
   function findPlanInInlineState() {
@@ -592,98 +498,67 @@
     }
     didScanInlinePlan = true;
 
-    const scripts = Array.from(document.querySelectorAll("script")).slice(0, 40);
     const pattern = /(?:plan_type|planType|subscription_type|subscriptionType|rate_limit_tier|rateLimitTier|billing_plan|billingPlan)["']?\s*[:=]\s*["']([^"']+)["']/i;
-
-    for (const script of scripts) {
+    return findFirst(Array.from(document.querySelectorAll("script")).slice(0, 40), (script) => {
       const text = script.textContent || "";
       if (!/plan|subscription|billing|tier/i.test(text)) {
-        continue;
+        return "";
       }
       const match = text.match(pattern);
-      const plan = normalizePlanName(match && match[1]);
-      if (plan) {
-        return plan;
-      }
-    }
-    return "";
-  }
-
-  function getUsageForOrg(orgId) {
-    const normalized = normalizeOrgId(orgId);
-    if (!normalized || !state.usageByOrg || !state.usageByOrg[normalized]) {
-      return null;
-    }
-
-    return Object.assign({}, state.usageByOrg[normalized]);
-  }
-
-  function storeUsageForOrg(orgId, usage) {
-    const normalized = normalizeOrgId(orgId);
-    if (!normalized || !usage || typeof usage !== "object") {
-      return;
-    }
-
-    state.usageByOrg = state.usageByOrg && typeof state.usageByOrg === "object"
-      ? state.usageByOrg
-      : {};
-    state.usageByOrg[normalized] = Object.assign({}, usage, {
-      organizationId: normalized
+      return normalizePlanName(match && match[1]);
     });
   }
 
-  function createStaleUsageForOrg(orgId, now) {
-    return {
-      organizationId: orgId,
-      windowLabel: "5h",
-      plan: "",
-      usagePercent: null,
-      resetText: "",
-      resetAt: null,
-      stale: true,
-      updatedAt: now
-    };
-  }
-
-  function detectOrganizationId(deep = false) {
-    const fromLocation = findOrgIdInText(window.location.href);
-    if (fromLocation) {
-      return fromLocation;
-    }
-
-    const fromPerformance = findOrgIdInPerformance();
-    if (fromPerformance) {
-      return fromPerformance;
-    }
-
-    if (!deep) {
+  // Walks nested storage/state values, remembering the key path so a match can
+  // be accepted only when it sits under a meaningful key.
+  function findInValue(value, matchText, limits, path = [], depth = 0) {
+    if (value == null || depth > limits.maxDepth) {
       return "";
     }
 
-    const sessionStorageRef = getWebStorage("sessionStorage");
-    const fromSessionStorage = findOrgIdInWebStorage(sessionStorageRef);
-    if (fromSessionStorage) {
-      return fromSessionStorage;
+    if (typeof value === "string") {
+      return matchText(value, path);
     }
 
-    const localStorageRef = getWebStorage("localStorage");
-    const fromLocalStorage = findOrgIdInWebStorage(localStorageRef);
-    if (fromLocalStorage) {
-      return fromLocalStorage;
+    const recurse = (item, itemPath) => findInValue(item, matchText, limits, itemPath, depth + 1);
+
+    if (Array.isArray(value)) {
+      return findFirst(sliceTo(value, limits.maxArrayItems), (item) => recurse(item, path));
+    }
+    if (typeof value !== "object") {
+      return "";
     }
 
+    return findFirst(sliceTo(Object.entries(value), limits.maxEntries), ([key, item]) =>
+      recurse(item, path.concat(key))
+    );
+  }
+
+  function sliceTo(items, limit) {
+    return Number.isFinite(limit) ? items.slice(0, limit) : items;
+  }
+
+  function detectOrganizationId(deep = false) {
+    const fromPage = findOrgIdInText(window.location.href) || findOrgIdInPerformance();
+    if (fromPage || !deep) {
+      return fromPage;
+    }
+
+    return (
+      findOrgIdInWebStorage(getWebStorage("sessionStorage")) ||
+      findOrgIdInWebStorage(getWebStorage("localStorage")) ||
+      findOrgIdInScripts()
+    );
+  }
+
+  function findOrgIdInScripts() {
     const scripts = Array.from(document.scripts || [])
       .filter((script) => !script.src || /json|javascript/i.test(script.type || ""))
       .slice(-30);
 
-    for (const script of scripts) {
-      const orgId = findOrgIdInText((script.textContent || "").slice(0, 250000));
-      if (orgId) {
-        return orgId;
-      }
-    }
-
-    return "";
+    return findFirst(scripts, (script) =>
+      findOrgIdInText((script.textContent || "").slice(0, 250000))
+    );
   }
 
   function findOrgIdInPerformance() {
@@ -693,20 +568,12 @@
 
     try {
       const entries = performance.getEntriesByType("resource");
-      const firstIndex = Math.max(0, entries.length - 80);
-
-      for (let index = entries.length - 1; index >= firstIndex; index -= 1) {
-        const entry = entries[index];
-        const orgId = findOrgIdInText(entry && entry.name);
-        if (orgId) {
-          return orgId;
-        }
-      }
+      return findFirst(entries.slice(-80).reverse(), (entry) =>
+        findOrgIdInText(entry && entry.name)
+      );
     } catch (_error) {
       return "";
     }
-
-    return "";
   }
 
   function getWebStorage(name) {
@@ -717,7 +584,7 @@
     }
   }
 
-  function findOrgIdInWebStorage(storage) {
+  function eachStorageEntry(storage, visit) {
     if (!storage) {
       return "";
     }
@@ -725,15 +592,9 @@
     try {
       for (let index = 0; index < storage.length; index += 1) {
         const key = storage.key(index);
-        const raw = storage.getItem(key) || "";
-        const structured = findOrgIdInStructuredText(raw);
-        if (structured) {
-          return structured;
-        }
-
-        const orgId = findOrgIdInText(`${key}:${raw.slice(0, 60000)}`);
-        if (orgId) {
-          return orgId;
+        const found = visit(key, storage.getItem(key) || "");
+        if (found) {
+          return found;
         }
       }
     } catch (_error) {
@@ -743,8 +604,14 @@
     return "";
   }
 
+  function findOrgIdInWebStorage(storage) {
+    return eachStorageEntry(storage, (key, raw) =>
+      findOrgIdInStructuredText(raw) || findOrgIdInText(`${key}:${raw.slice(0, 60000)}`)
+    );
+  }
+
   function findOrgIdInStructuredText(text) {
-    if (!text || !/[\[{]/.test(text)) {
+    if (!text || !/[[{]/.test(text)) {
       return "";
     }
 
@@ -755,38 +622,25 @@
     }
   }
 
-  function findOrgIdInValue(value, path = [], depth = 0) {
-    if (depth > 8 || value == null) {
-      return "";
-    }
-
-    const pathText = path.join(".").toLowerCase();
-    if (typeof value === "string") {
-      const orgId = normalizeOrgId(value);
-      return orgId && /organization|org/.test(pathText) ? orgId : "";
-    }
-
-    if (Array.isArray(value)) {
-      for (const item of value.slice(0, 80)) {
-        const orgId = findOrgIdInValue(item, path, depth + 1);
-        if (orgId) {
-          return orgId;
-        }
-      }
-      return "";
-    }
-
-    if (typeof value === "object") {
-      for (const [key, item] of Object.entries(value).slice(0, 250)) {
-        const orgId = findOrgIdInValue(item, path.concat(key), depth + 1);
-        if (orgId) {
-          return orgId;
-        }
-      }
-    }
-
-    return "";
+  function findOrgIdInValue(value) {
+    return findInValue(
+      value,
+      (text, path) => {
+        const orgId = normalizeOrgId(text);
+        return orgId && /organization|org/i.test(path.join(".")) ? orgId : "";
+      },
+      { maxDepth: 8, maxArrayItems: 80, maxEntries: 250 }
+    );
   }
+
+  const KEYED_ORG_ID_PATTERN = new RegExp(
+    `(?:organization_id|organizationId|org_id|orgId|currentOrganizationId|activeOrganizationId|active_org_id|organizationUUID)[^A-Za-z0-9_-]{0,40}(${ORG_ID_SOURCE})`,
+    "i"
+  );
+  const NESTED_ORG_ID_PATTERN = new RegExp(
+    `(?:organization|org)[\\s\\S]{0,160}?(?:uuid|id)[^A-Za-z0-9_-]{0,40}(${ORG_ID_SOURCE})`,
+    "i"
+  );
 
   function findOrgIdInText(text) {
     const value = String(text || "");
@@ -795,26 +649,8 @@
       return normalizeOrgId(endpointMatch[1]);
     }
 
-    const keyedMatch = value.match(
-      /(?:organization_id|organizationId|org_id|orgId|currentOrganizationId|activeOrganizationId|active_org_id|organizationUUID)[^A-Za-z0-9_-]{0,40}([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|org_[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{20,})/i
-    );
-    if (keyedMatch) {
-      return normalizeOrgId(keyedMatch[1]);
-    }
-
-    const nestedOrgMatch = value.match(
-      /(?:organization|org)[\s\S]{0,160}?(?:uuid|id)[^A-Za-z0-9_-]{0,40}([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|org_[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{20,})/i
-    );
-    return nestedOrgMatch ? normalizeOrgId(nestedOrgMatch[1]) : "";
-  }
-
-  function normalizeOrgId(value) {
-    const text = String(value || "").trim();
-    const match =
-      text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i) ||
-      text.match(/\borg_[A-Za-z0-9_-]{8,}\b/) ||
-      text.match(/\b[A-Za-z0-9_-]{20,}\b/);
-    return match ? match[0] : "";
+    const match = value.match(KEYED_ORG_ID_PATTERN) || value.match(NESTED_ORG_ID_PATTERN);
+    return match ? normalizeOrgId(match[1]) : "";
   }
 
   function installDomPoller() {
@@ -846,20 +682,17 @@
     window.addEventListener("resize", () => scheduleUpdate({ forceComposerScan: true }), {
       passive: true
     });
-    window.addEventListener("focus", () => {
-      scheduleUpdate({ forceComposerScan: true });
-      detectAndPersistOrgId(true);
-      detectAndPersistPlan(true);
-    }, {
-      passive: true
-    });
+    window.addEventListener("focus", handlePageActivated, { passive: true });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) {
-        scheduleUpdate({ forceComposerScan: true });
-        detectAndPersistOrgId(true);
-        detectAndPersistPlan(true);
+        handlePageActivated();
       }
     });
+  }
+
+  function handlePageActivated() {
+    scheduleUpdate({ forceComposerScan: true });
+    rescanPage(true);
   }
 
   function scheduleUpdate(options = {}) {
@@ -872,34 +705,17 @@
     await refreshUsageCacheFromPage();
 
     const composer = findComposerContainer(Boolean(options.forceComposerScan));
-
     if (!composer || isUsageSettingsPage()) {
       removeBar();
       return;
     }
 
-    const usageState = buildUsageState();
-    if (!usageState) {
-      removeBar();
-      return;
-    }
-
     injectBarBesideComposer(composer, Boolean(options.forceComposerScan));
-    renderBar(usageState);
+    renderBar(buildUsageState());
   }
 
   function buildUsageState() {
     const usageData = getClaudeUsageData();
-    if (!usageData && !RENDER_NEUTRAL_PLACEHOLDERS) {
-      return null;
-    }
-
-    const convUI = normalizeConversationTokensUI(state.conversationTokensUI);
-    const currentConvId = getConversationIdFromUrl();
-    const conversationTokens =
-      convUI && convUI.conversationId === currentConvId
-        ? convUI.conversationTokens
-        : null;
     const sync = getUsageSyncPresentation(Boolean(usageData));
 
     return {
@@ -909,7 +725,7 @@
       ),
       usagePercent: usageData ? usageData.usagePercent : null,
       resetText: usageData ? usageData.resetText : sync.fallbackText,
-      conversationTokens,
+      conversationTokens: getVisibleConversationTokens(),
       syncState: sync.state,
       syncTitle: sync.title,
       details: buildUsageDetails(state.usage),
@@ -918,42 +734,40 @@
   }
 
   function buildUsageDetails(usageValue) {
-    const usage = usageValue && typeof usageValue === "object" ? usageValue : {};
-    const fiveHourPercent = coerceOptionalPercent(usage.fiveHourPercent ?? usage.usagePercent);
-    const sevenDayPercent = coerceOptionalPercent(usage.sevenDayPercent);
-    const extraUsagePercent = coerceOptionalPercent(usage.extraUsagePercent);
-    const rows = [];
-
-    if (fiveHourPercent !== null) {
-      rows.push({
+    const usage = asObject(usageValue);
+    const rows = [
+      {
         key: "five-hour",
         label: "5-hour",
-        percent: fiveHourPercent,
-        detail: formatDetailReset(usage.fiveHourResetAt ?? usage.resetAt)
-      });
-    }
-    if (sevenDayPercent !== null) {
-      rows.push({
+        percent: coerceOptionalPercent(usage.fiveHourPercent ?? usage.usagePercent),
+        detail: () => formatDetailReset(usage.fiveHourResetAt ?? usage.resetAt)
+      },
+      {
         key: "weekly",
         label: "Weekly",
-        percent: sevenDayPercent,
-        detail: formatDetailReset(usage.sevenDayResetAt)
-      });
-    }
-    if (extraUsagePercent !== null) {
-      rows.push({
+        percent: coerceOptionalPercent(usage.sevenDayPercent),
+        detail: () => formatDetailReset(usage.sevenDayResetAt)
+      },
+      {
         key: "extra",
         label: "Extra usage",
-        percent: extraUsagePercent,
-        detail: formatExtraUsageAmount(
+        percent: coerceOptionalPercent(usage.extraUsagePercent),
+        detail: () => formatExtraUsageAmount(
           usage.extraUsageUsedCredits,
           usage.extraUsageMonthlyLimit,
           usage.extraUsageCurrency
         )
-      });
-    }
+      }
+    ];
 
-    return rows;
+    return rows
+      .filter((row) => row.percent !== null)
+      .map((row) => ({
+        key: row.key,
+        label: row.label,
+        percent: row.percent,
+        detail: row.detail()
+      }));
   }
 
   function coerceOptionalPercent(value) {
@@ -990,12 +804,12 @@
 
   function buildBurnForecastPresentation(value, now = Date.now()) {
     const explanation = "Forecasts whether your current 5-hour usage pace will reach Claude's limit before it resets.";
-    const forecast = value && typeof value === "object" ? value : null;
-    const calculatedAt = Number(forecast && forecast.calculatedAt);
-    const sampleCount = Number(forecast && forecast.sampleCount);
-    const observedMinutes = Number(forecast && forecast.observedMinutes);
-    const percentPerHour = Number(forecast && forecast.percentPerHour);
-    const estimatedLimitAt = Number(forecast && forecast.estimatedLimitAt);
+    const forecast = asObject(value);
+    const calculatedAt = Number(forecast.calculatedAt);
+    const sampleCount = Number(forecast.sampleCount);
+    const observedMinutes = Number(forecast.observedMinutes);
+    const percentPerHour = Number(forecast.percentPerHour);
+    const estimatedLimitAt = Number(forecast.estimatedLimitAt);
     const isRecent = Number.isFinite(calculatedAt) && now - calculatedAt <= 20 * 60 * 1000;
 
     if (
@@ -1110,7 +924,6 @@
       return null;
     }
 
-    const resetText = getCurrentResetText(usage);
     const hasFreshReset = Number.isFinite(usage.resetAt)
       ? usage.resetAt > Date.now() - 60 * 1000
       : Date.now() - usage.updatedAt < USAGE_CACHE_MAX_AGE_MS;
@@ -1126,7 +939,7 @@
       windowLabel: usage.windowLabel || "5h",
       plan: normalizePlanName(usage.plan),
       usagePercent: usage.usagePercent,
-      resetText,
+      resetText: getCurrentResetText(usage),
       stale: Boolean(usage.stale),
       source: usage.source || "settings-cache"
     };
@@ -1198,7 +1011,7 @@
         stale: false,
         updatedAt: Date.now()
       });
-      storeUsageForOrg(state.usage.organizationId, state.usage);
+      storeUsageForOrg(state, state.usage.organizationId, state.usage);
       scheduleSave();
     }
   }
@@ -1220,11 +1033,9 @@
     }
 
     const rawReset = pickResetText(currentBlock);
-    const plan = pickPlan(text);
-
     return {
       windowLabel: "5h",
-      plan,
+      plan: pickPlan(text),
       usagePercent,
       resetText: normalizeResetText(rawReset),
       resetAt: parseResetAt(rawReset)
@@ -1250,9 +1061,7 @@
     }
 
     const percent = coercePercent(usageState.usagePercent);
-    const tone = getUsageTone(percent);
     const percentText = Number.isFinite(percent) ? `${percent}%` : "--";
-    const progress = Number.isFinite(percent) ? `${percent}%` : "0%";
     const planText = usageState.plan || "Plan unavailable";
     const planTooltip = usageState.plan
       ? `Claude plan: ${usageState.plan}`
@@ -1271,16 +1080,13 @@
           <span>${escapeHtml(tokenText)}</span>
         </span>`
       : "";
-    const detailsHtml = renderUsageDetails(usageState.details);
-    const forecastHtml = renderBurnForecast(usageState.forecast);
-    const themePickerHtml = renderThemePicker(themePreference);
 
-    bar.dataset.usageTone = tone;
+    bar.dataset.usageTone = getUsageTone(percent);
     bar.dataset.theme = resolveThemePreference(themePreference);
     bar.dataset.hasTokens = tokenText ? "true" : "false";
     bar.dataset.syncState = usageState.syncState;
     bar.dataset.detailsOpen = detailsOpen ? "true" : "false";
-    bar.style.setProperty("--cum-progress", progress);
+    bar.style.setProperty("--cum-progress", Number.isFinite(percent) ? `${percent}%` : "0%");
     bar.setAttribute("aria-label", "Claude usage meter");
 
     const html = `
@@ -1308,9 +1114,9 @@
           <span>Usage details</span>
           <a href="${SETTINGS_URL}">Claude settings</a>
         </div>
-        ${detailsHtml}
-        ${forecastHtml}
-        ${themePickerHtml}
+        ${renderUsageDetails(usageState.details)}
+        ${renderBurnForecast(usageState.forecast)}
+        ${renderThemePicker(themePreference)}
       </div>
     `;
 
@@ -1408,9 +1214,10 @@
   }
 
   function handleBarClick(event) {
-    const themeButton = event.target && event.target.closest
-      ? event.target.closest("[data-cum-theme-choice]")
-      : null;
+    const target = event.target;
+    const closestFrom = (selector) => (target && target.closest ? target.closest(selector) : null);
+
+    const themeButton = closestFrom("[data-cum-theme-choice]");
     if (themeButton) {
       event.preventDefault();
       event.stopPropagation();
@@ -1418,14 +1225,9 @@
       return;
     }
 
-    const refreshButton = event.target && event.target.closest
-      ? event.target.closest(".cum-refresh")
-      : null;
+    const refreshButton = closestFrom(".cum-refresh");
     if (!refreshButton || usageRefreshPending) {
-      const main = event.target && event.target.closest
-        ? event.target.closest(".cum-main")
-        : null;
-      if (main || event.target === bar) {
+      if (closestFrom(".cum-main") || target === bar) {
         event.preventDefault();
         detailsOpen = !detailsOpen;
         renderBar(buildUsageState());
@@ -1444,10 +1246,12 @@
     return viewportWidth <= COMPACT_LAYOUT_MAX_WIDTH;
   }
 
+  function getMountedBars() {
+    return Array.from(document.querySelectorAll(`[id="${ROOT_ID}"]`));
+  }
+
   function reconcileBarElement() {
-    const mountedBars = Array.from(
-      document.querySelectorAll(`[id="${ROOT_ID}"]`)
-    );
+    const mountedBars = getMountedBars();
     const connectedCurrent =
       bar && bar.isConnected && mountedBars.includes(bar) ? bar : null;
     const canonicalBar = connectedCurrent || mountedBars[0] || null;
@@ -1517,9 +1321,7 @@
   function removeBar() {
     releaseCompactMeterSpace();
     detailsOpen = false;
-    Array.from(document.querySelectorAll(`[id="${ROOT_ID}"]`)).forEach((mountedBar) => {
-      mountedBar.remove();
-    });
+    getMountedBars().forEach((mountedBar) => mountedBar.remove());
     bar = null;
     lastRenderedHtml = "";
   }
@@ -1529,23 +1331,13 @@
       return cachedComposer;
     }
 
-    const candidates = Array.from(
-      document.querySelectorAll("textarea,[contenteditable='true']")
-    )
+    const candidates = Array.from(document.querySelectorAll(COMPOSER_SELECTOR))
       .filter((node) => !node.closest(`#${ROOT_ID}`))
       .slice(-30)
       .reverse();
 
-    for (const candidate of candidates) {
-      const composer = findComposerAncestor(candidate);
-      if (composer) {
-        cachedComposer = composer;
-        return composer;
-      }
-    }
-
-    cachedComposer = null;
-    return null;
+    cachedComposer = findFirst(candidates, findComposerAncestor) || null;
+    return cachedComposer;
   }
 
   function isUsableComposer(composer) {
@@ -1553,7 +1345,7 @@
       return false;
     }
 
-    return Boolean(composer.querySelector("textarea,[contenteditable='true']"));
+    return Boolean(composer.querySelector(COMPOSER_SELECTOR));
   }
 
   function findComposerAncestor(node) {
@@ -1577,10 +1369,10 @@
 
   function isComposerLikeBox(node, rect) {
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-    const hasInput = node.querySelector && node.querySelector("textarea,[contenteditable='true']");
+    const hasInput = node.querySelector && node.querySelector(COMPOSER_SELECTOR);
     const hasButton = node.querySelector && node.querySelector("button,[role='button']");
 
-    return (
+    return Boolean(
       hasInput &&
       hasButton &&
       rect.width >= 300 &&
@@ -1636,55 +1428,15 @@
       /(?:Current|Subscription) plan\s*:?\s*([^\n]+)/i
     ];
 
-    for (const pattern of patterns) {
+    return findFirst(patterns, (pattern) => {
       const match = String(text || "").match(pattern);
-      const plan = normalizePlanName(match && match[1]);
-      if (plan) {
-        return plan;
-      }
-    }
-
-    return "";
-  }
-
-  function normalizePlanName(value) {
-    const text = String(value || "")
-      .replace(/[_-]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!text) {
-      return "";
-    }
-
-    const maxMatch = text.match(/\bmax(?:\s+plan)?(?:\s+(5x|20x))?\b/i);
-    if (maxMatch) {
-      return maxMatch[1] ? `Max ${maxMatch[1].toLowerCase()}` : "Max";
-    }
-    if (/\benterprise\b/i.test(text)) {
-      return "Enterprise";
-    }
-    if (/\beducation\b|\bedu\b/i.test(text)) {
-      return "Education";
-    }
-    if (/\bteam\b/i.test(text)) {
-      return "Team";
-    }
-    if (/\bpro\b/i.test(text)) {
-      return "Pro";
-    }
-    if (/\bfree\b/i.test(text)) {
-      return "Free";
-    }
-    return "";
+      return normalizePlanName(match && match[1]);
+    });
   }
 
   function pickPercent(text) {
     const matches = Array.from(String(text || "").matchAll(/(\d{1,3})(?:\.\d+)?\s*%/g));
-    if (!matches.length) {
-      return null;
-    }
-
-    return coercePercent(Number(matches[matches.length - 1][1]));
+    return matches.length ? coercePercent(Number(matches[matches.length - 1][1])) : null;
   }
 
   function pickResetText(text) {
@@ -1698,20 +1450,15 @@
   }
 
   function parseDurationMs(text) {
-    let total = 0;
     const pattern = /(\d+(?:\.\d+)?)\s*(d|day|days|h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b/gi;
+    let total = 0;
     let match;
 
     while ((match = pattern.exec(String(text || "")))) {
       const value = Number(match[1]);
-      const unit = match[2].toLowerCase();
-      if (unit.startsWith("d")) {
-        total += value * 24 * 60 * 60 * 1000;
-      } else if (unit.startsWith("h")) {
-        total += value * 60 * 60 * 1000;
-      } else {
-        total += value * 60 * 1000;
-      }
+      const unit = match[2][0].toLowerCase();
+      const scale = unit === "d" ? 24 * 60 : unit === "h" ? 60 : 1;
+      total += value * scale * 60 * 1000;
     }
 
     return total;
@@ -1735,47 +1482,20 @@
       .replace(/\s+/g, " ");
   }
 
-  function formatDuration(milliseconds) {
-    const minutesTotal = Math.max(0, Math.round(milliseconds / 60000));
-    const hours = Math.floor(minutesTotal / 60);
-    const minutes = minutesTotal % 60;
-
-    if (hours >= 24) {
-      const days = Math.floor(hours / 24);
-      const remainingHours = hours % 24;
-      return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
-    }
-    if (hours > 0) {
-      return `${hours}h ${minutes}m`;
-    }
-    return `${minutes}m`;
-  }
-
-  function coercePercent(value) {
-    const number = Number(value);
-    if (!Number.isFinite(number)) {
-      return null;
-    }
-    return Math.max(0, Math.min(100, Math.round(number)));
-  }
-
   function normalizeConversationTokensUI(value) {
-    if (!value || typeof value !== "object") {
-      return null;
-    }
-
-    const conversationTokens = Number(value.conversationTokens);
-    const updatedAt = Number(value.updatedAt);
+    const source = asObject(value);
+    const conversationTokens = Number(source.conversationTokens);
+    const updatedAt = Number(source.updatedAt);
     if (
-      typeof value.conversationId !== "string" ||
-      !value.conversationId ||
+      typeof source.conversationId !== "string" ||
+      !source.conversationId ||
       !Number.isFinite(conversationTokens)
     ) {
       return null;
     }
 
     return {
-      conversationId: value.conversationId,
+      conversationId: source.conversationId,
       conversationTokens: Math.max(0, Math.round(conversationTokens)),
       updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0
     };
@@ -1783,24 +1503,23 @@
 
   function selectConversationTokenState(incomingValue, currentValue, conversationId) {
     const incoming = normalizeConversationTokensUI(incomingValue);
-    const current = normalizeConversationTokensUI(currentValue);
-
     if (incoming && incoming.conversationId === conversationId) {
       return incoming;
     }
-    if (current && current.conversationId === conversationId) {
-      return current;
-    }
-    return null;
+
+    const current = normalizeConversationTokensUI(currentValue);
+    return current && current.conversationId === conversationId ? current : null;
+  }
+
+  function getVisibleConversationTokens() {
+    const convUI = normalizeConversationTokensUI(state.conversationTokensUI);
+    return convUI && convUI.conversationId === getConversationIdFromUrl()
+      ? convUI.conversationTokens
+      : null;
   }
 
   function getCurrentTokenEstimateText() {
-    const convUI = normalizeConversationTokensUI(state.conversationTokensUI);
-    const currentConvId = getConversationIdFromUrl();
-    const conversationTokens = convUI && convUI.conversationId === currentConvId
-      ? convUI.conversationTokens
-      : null;
-    return formatEstimatedTokenCount(conversationTokens);
+    return formatEstimatedTokenCount(getVisibleConversationTokens());
   }
 
   function formatEstimatedTokenCount(value) {
@@ -1815,8 +1534,7 @@
       return "Never synced";
     }
 
-    const elapsedMs = Math.max(0, Number(now) - updatedAt);
-    const elapsedMinutes = Math.floor(elapsedMs / 60000);
+    const elapsedMinutes = Math.floor(Math.max(0, Number(now) - updatedAt) / 60000);
     if (elapsedMinutes < 1) {
       return "Updated just now";
     }
@@ -1825,26 +1543,19 @@
     }
 
     const elapsedHours = Math.floor(elapsedMinutes / 60);
-    if (elapsedHours < 24) {
-      return `Updated ${elapsedHours}h ago`;
-    }
-
-    return `Updated ${Math.floor(elapsedHours / 24)}d ago`;
+    return elapsedHours < 24
+      ? `Updated ${elapsedHours}h ago`
+      : `Updated ${Math.floor(elapsedHours / 24)}d ago`;
   }
 
-  function getDayKey(timestamp = Date.now()) {
-    const now = new Date(timestamp);
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, "0");
-    const day = String(now.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
-  }
+  const HTML_ESCAPES = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;"
+  };
 
   function escapeHtml(value) {
-    return String(value || "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+    return String(value || "").replace(/[&<>"]/g, (character) => HTML_ESCAPES[character]);
   }
 })();

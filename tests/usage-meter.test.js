@@ -17,6 +17,14 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+// Both entry points are loaded after src/lib/shared.js by the manifest, so the
+// harnesses evaluate it into the same context first.
+function runInHarnessContext(entryPoint, context) {
+  ["src/lib/shared.js", entryPoint].forEach((file) => {
+    vm.runInNewContext(fs.readFileSync(path.join(ROOT, file), "utf8"), context, { filename: file });
+  });
+}
+
 function makeUsageResponse({ utilization, resetsAt, sevenDay = 9, extra = 61.625, planType }) {
   return {
     plan_type: planType,
@@ -130,11 +138,7 @@ function createBackgroundHarness(fetchImpl, options = {}) {
   if (options.tokenCounter) {
     context.__gptTokenizerCount = options.tokenCounter;
   }
-  vm.runInNewContext(
-    fs.readFileSync(path.join(ROOT, "src/background.js"), "utf8"),
-    context,
-    { filename: "src/background.js" }
-  );
+  runInHarnessContext("src/background.js", context);
 
   return {
     async send(message) {
@@ -180,11 +184,7 @@ function createContentLifecycleHarness(options = {}) {
     }
   };
 
-  vm.runInNewContext(
-    fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8"),
-    context,
-    { filename: "src/content.js" }
-  );
+  runInHarnessContext("src/content.js", context);
 
   return {
     addBar(name) {
