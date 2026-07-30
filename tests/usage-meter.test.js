@@ -466,6 +466,31 @@ test("burn forecast requires a stable trend from the current reset window", () =
   }]);
 });
 
+test("burn forecast survives rounding jitter and follows the recent pace", () => {
+  const harness = createBackgroundHarness(async () => ({ ok: false, status: 503 }));
+  const now = Date.parse("2026-07-29T12:00:00Z");
+  const resetAt = now + 2 * 60 * 60_000;
+
+  const jittery = harness.hooks.calculateBurnForecast([
+    { timestamp: now - 20 * 60_000, percent: 10 },
+    { timestamp: now - 10 * 60_000, percent: 19.6 },
+    { timestamp: now, percent: 30 }
+  ].map((sample) => ({ ...sample, resetAt })), now, resetAt);
+  assert.equal(jittery.willHitBeforeReset, true);
+  assert.equal(jittery.sampleCount, 3);
+
+  const idled = harness.hooks.calculateBurnForecast([
+    { timestamp: now - 200 * 60_000, percent: 10 },
+    { timestamp: now - 190 * 60_000, percent: 40 },
+    { timestamp: now - 20 * 60_000, percent: 41 },
+    { timestamp: now - 10 * 60_000, percent: 41.4 },
+    { timestamp: now, percent: 41.8 }
+  ].map((sample) => ({ ...sample, resetAt })), now, resetAt);
+  assert.equal(idled.observedMinutes, 20);
+  assert.equal(idled.sampleCount, 3);
+  assert.equal(idled.willHitBeforeReset, false);
+});
+
 test("content shows only an explicitly marked conversation token estimate", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
   const backgroundSource = fs.readFileSync(path.join(ROOT, "src/background.js"), "utf8");

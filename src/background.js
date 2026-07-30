@@ -36,6 +36,8 @@
   const MIN_SAMPLE_INTERVAL_MS = 60 * 1000;
   const MIN_FORECAST_SAMPLES = 3;
   const MIN_FORECAST_SPAN_MS = 10 * 60 * 1000;
+  const FORECAST_JITTER_TOLERANCE = 1;
+  const FORECAST_WINDOW_MS = 90 * 60 * 1000;
   const API_HEADERS = {
     "anthropic-client-platform": "web_claude_ai",
     "content-type": "application/json"
@@ -454,6 +456,17 @@
     return Number.isFinite(raw) ? raw : fallback;
   }
 
+  // Prefer the recent pace so an early burst stops predicting a limit hours after
+  // the conversation went idle, but keep the full history when the recent slice is
+  // too short to measure.
+  function selectForecastSamples(samples, now) {
+    const windowed = samples.filter((sample) => now - sample.timestamp <= FORECAST_WINDOW_MS);
+    const spansEnough =
+      windowed.length >= MIN_FORECAST_SAMPLES &&
+      windowed[windowed.length - 1].timestamp - windowed[0].timestamp >= MIN_FORECAST_SPAN_MS;
+    return spansEnough ? windowed : samples.slice(-MAX_USAGE_SAMPLES);
+  }
+
   function calculateBurnForecast(existingSamples, now = Date.now(), expectedResetAt = null) {
     const resetAt = Number(expectedResetAt);
     const samples = sanitizeUsageSamples(existingSamples).filter((sample) =>
@@ -463,15 +476,22 @@
       return null;
     }
 
-    const recent = samples.slice(-MAX_USAGE_SAMPLES);
+    // Reported utilization can dip by a fraction of a point between polls without
+    // usage actually going down. Treating every dip as a reset used to blank the
+    // forecast for the rest of the window, so only a real drop ends the trend.
+    const hasDecrease = samples.some((sample, index) =>
+      index > 0 && sample.percent < samples[index - 1].percent - FORECAST_JITTER_TOLERANCE
+    );
+    if (hasDecrease) {
+      return null;
+    }
+
+    const recent = selectForecastSamples(samples, now);
     const first = recent[0];
     const last = recent[recent.length - 1];
     const spanMs = last.timestamp - first.timestamp;
     const percentDelta = last.percent - first.percent;
-    const hasDecrease = recent.some((sample, index) =>
-      index > 0 && sample.percent < recent[index - 1].percent
-    );
-    if (spanMs < MIN_FORECAST_SPAN_MS || percentDelta < 0.5 || hasDecrease) {
+    if (spanMs < MIN_FORECAST_SPAN_MS || percentDelta < 0.5) {
       return null;
     }
 
