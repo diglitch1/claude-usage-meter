@@ -53,8 +53,9 @@ does not send conversation or usage data to an external service.
 - Claude's tokenizer is not exposed, so the included `o200k_base` tokenizer is an
   approximation.
 - The burn forecast needs measurable usage changes across at least ten minutes in
-  the same reset window. A dash means there is not enough data. Forecasts are not
-  guaranteed limit times.
+  the same reset window, and follows the pace of the last ninety minutes so an
+  early burst does not keep predicting a limit after the chat goes idle. A dash
+  means there is not enough data. Forecasts are not guaranteed limit times.
 
 ## Theme Colors
 
