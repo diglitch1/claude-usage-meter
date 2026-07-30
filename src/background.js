@@ -605,8 +605,12 @@
         continue;
       }
 
+      // Claude returns each message as structured content blocks *and* as a
+      // flattened `text` mirror of those same blocks. Counting both doubled every
+      // estimate, so `text` is only a fallback when there are no blocks to read.
+      const countBefore = parts.length;
       appendContentText(parts, message.content, 0);
-      if (typeof message.text === "string") {
+      if (parts.length === countBefore && typeof message.text === "string") {
         parts.push(message.text);
       }
     }
@@ -637,8 +641,11 @@
       return;
     }
 
+    // A block's own `content` is the structured form of its `text`, so reading both
+    // would count the block twice.
     if (typeof value.text === "string") {
       parts.push(value.text);
+      return;
     }
     if (typeof value.content === "string" || Array.isArray(value.content)) {
       appendContentText(parts, value.content, depth + 1);

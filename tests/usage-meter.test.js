@@ -253,6 +253,26 @@ test("switching conversations stores estimates independently", async () => {
   });
 });
 
+test("conversation token estimate counts each message body once", async () => {
+  // Claude sends both `content` blocks and a flattened `text` mirror of them.
+  const harness = createBackgroundHarness(async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        chat_messages: [
+          { content: [{ text: "one two three" }], text: "one two three" },
+          { content: [{ text: "four five", content: [{ text: "four five" }] }] },
+          { text: "six" }
+        ]
+      };
+    }
+  }));
+
+  const uiState = await harness.hooks.updateConversationTokens(ORG_A, CONV_A);
+  assert.equal(uiState.conversationTokens, 6);
+});
+
 test("background updates conversation tokens from content script message", async () => {
   const harness = createBackgroundHarness(async () => conversationResponse([
     "red blue green"
