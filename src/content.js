@@ -819,10 +819,10 @@
       : coercePercent(value);
   }
 
-  function formatDetailReset(resetAt) {
+  function formatDetailReset(resetAt, now = Date.now()) {
     const timestamp = Number(resetAt);
     return Number.isFinite(timestamp) && timestamp > 0
-      ? `resets in ${formatDuration(timestamp - Date.now())}`
+      ? `resets in ${formatDuration(timestamp - now)}`
       : "";
   }
 
@@ -1174,8 +1174,10 @@
       return '<div class="cum-details-empty">Usage details are not available yet.</div>';
     }
 
+    // Each row carries its own tone: a 95% weekly bar used to inherit the five-hour
+    // window's calm colour and read as safe.
     return rows.map((row) => `
-      <div class="cum-detail-row" data-detail-key="${escapeHtml(row.key)}">
+      <div class="cum-detail-row" data-detail-key="${escapeHtml(row.key)}" data-detail-tone="${getUsageTone(coercePercent(row.percent))}">
         <span class="cum-detail-label">${escapeHtml(row.label)}</span>
         <span class="cum-detail-track"><span style="width:${coercePercent(row.percent)}%"></span></span>
         <span class="cum-detail-percent">${coercePercent(row.percent)}%</span>

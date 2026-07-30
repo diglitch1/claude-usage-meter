@@ -7,9 +7,23 @@
   --cum-text: rgb(244, 243, 238);
   --cum-muted: rgb(186, 183, 176);
   --cum-track: rgba(255, 255, 255, 0.12);
-  --cum-accent: #facc15;
-  --cum-accent-soft: rgba(250, 204, 21, 0.14);
+  --cum-tone-low: #facc15;
+  --cum-tone-medium: #fd5602;
+  --cum-tone-high: #ef4444;
+  --cum-accent: var(--cum-tone-low);
   --cum-progress: 0%;
+  --cum-weight-regular: 500;
+  --cum-weight-medium: 600;
+  --cum-weight-strong: 680;
+  --cum-focus-ring: inset 0 0 0 1px color-mix(in srgb, var(--cum-accent) 55%, transparent);
+  --cum-fill-glow: 0 0 12px color-mix(in srgb, var(--cum-accent) 42%, transparent);
+  --cum-label-col: 76px;
+  --cum-bar-col: 70px;
+  --cum-percent-col: 38px;
+  --cum-meta-col: 132px;
+  --cum-usage-col: 132px;
+  --cum-reset-col: 96px;
+  --cum-tokens-col: 112px;
   --cum-icon: rgb(225, 223, 217);
   --cum-risk: #fb923c;
   --cum-safe: #86efac;
@@ -31,7 +45,7 @@
   color-scheme: dark;
   cursor: default;
   display: grid;
-  font: 500 12px/1.15 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: var(--cum-weight-regular) 12px/1.15 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   grid-template-columns: minmax(0, 1fr) 30px;
   letter-spacing: 0;
   margin-bottom: 8px;
@@ -54,6 +68,9 @@
   --cum-text: rgb(48, 47, 43);
   --cum-muted: rgb(105, 102, 95);
   --cum-track: rgba(35, 34, 31, 0.11);
+  --cum-tone-low: #ca8a04;
+  --cum-tone-medium: #c2410c;
+  --cum-tone-high: #b91c1c;
   --cum-icon: rgb(83, 80, 74);
   --cum-risk: #c2410c;
   --cum-safe: #15803d;
@@ -66,34 +83,21 @@
   color-scheme: light;
 }
 
-#claude-usage-meter-root[data-usage-tone="low"] {
-  --cum-accent: #facc15;
-  --cum-accent-soft: rgba(250, 204, 21, 0.16);
+/* One tone scale drives both themes and every bar, so a row's colour always
+   reflects that row's own percentage. */
+#claude-usage-meter-root[data-usage-tone="low"],
+#claude-usage-meter-root .cum-detail-row[data-detail-tone="low"] {
+  --cum-accent: var(--cum-tone-low);
 }
 
-#claude-usage-meter-root[data-usage-tone="medium"] {
-  --cum-accent: #fd5602;
-  --cum-accent-soft: rgba(253, 86, 2, 0.16);
+#claude-usage-meter-root[data-usage-tone="medium"],
+#claude-usage-meter-root .cum-detail-row[data-detail-tone="medium"] {
+  --cum-accent: var(--cum-tone-medium);
 }
 
-#claude-usage-meter-root[data-usage-tone="high"] {
-  --cum-accent: #ef4444;
-  --cum-accent-soft: rgba(239, 68, 68, 0.16);
-}
-
-#claude-usage-meter-root[data-theme="light"][data-usage-tone="low"] {
-  --cum-accent: #ca8a04;
-  --cum-accent-soft: rgba(202, 138, 4, 0.14);
-}
-
-#claude-usage-meter-root[data-theme="light"][data-usage-tone="medium"] {
-  --cum-accent: #c2410c;
-  --cum-accent-soft: rgba(194, 65, 12, 0.14);
-}
-
-#claude-usage-meter-root[data-theme="light"][data-usage-tone="high"] {
-  --cum-accent: #b91c1c;
-  --cum-accent-soft: rgba(185, 28, 28, 0.14);
+#claude-usage-meter-root[data-usage-tone="high"],
+#claude-usage-meter-root .cum-detail-row[data-detail-tone="high"] {
+  --cum-accent: var(--cum-tone-high);
 }
 
 #claude-usage-meter-root:hover,
@@ -131,7 +135,7 @@
   cursor: pointer;
   display: grid;
   font: inherit;
-  grid-template-columns: max-content minmax(132px, 1fr) minmax(96px, max-content);
+  grid-template-columns: max-content minmax(var(--cum-usage-col), 1fr) minmax(var(--cum-reset-col), max-content);
   height: 100%;
   padding: 0;
   text-align: left;
@@ -139,7 +143,7 @@
 }
 
 #claude-usage-meter-root[data-has-tokens="true"] .cum-main {
-  grid-template-columns: max-content minmax(132px, 1fr) minmax(96px, max-content) minmax(112px, max-content);
+  grid-template-columns: max-content minmax(var(--cum-usage-col), 1fr) minmax(var(--cum-reset-col), max-content) minmax(var(--cum-tokens-col), max-content);
 }
 
 #claude-usage-meter-root .cum-main:focus-visible {
@@ -147,7 +151,7 @@
 }
 
 #claude-usage-meter-root .cum-main:focus-visible .cum-section {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cum-accent) 46%, transparent);
+  box-shadow: var(--cum-focus-ring);
 }
 
 #claude-usage-meter-root .cum-section:not(:first-child) {
@@ -172,7 +176,7 @@
   color: var(--cum-text);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
-  font-weight: 680;
+  font-weight: var(--cum-weight-strong);
 }
 
 #claude-usage-meter-root .cum-usage {
@@ -193,7 +197,7 @@
 #claude-usage-meter-root .cum-progress-fill {
   background: var(--cum-accent);
   border-radius: inherit;
-  box-shadow: 0 0 12px color-mix(in srgb, var(--cum-accent) 42%, transparent);
+  box-shadow: var(--cum-fill-glow);
   display: block;
   width: var(--cum-progress);
 }
@@ -201,13 +205,13 @@
 #claude-usage-meter-root .cum-reset,
 #claude-usage-meter-root .cum-tokens {
   color: var(--cum-muted);
-  font-weight: 500;
+  font-weight: var(--cum-weight-regular);
 }
 
 #claude-usage-meter-root .cum-limit-label {
   color: var(--cum-text);
   font-variant-numeric: tabular-nums;
-  font-weight: 650;
+  font-weight: var(--cum-weight-medium);
 }
 
 #claude-usage-meter-root .cum-icon {
@@ -242,8 +246,12 @@
   padding: 0;
 }
 
-#claude-usage-meter-root .cum-refresh:hover,
+#claude-usage-meter-root .cum-refresh:hover {
+  color: var(--cum-text);
+}
+
 #claude-usage-meter-root .cum-refresh:focus-visible {
+  box-shadow: var(--cum-focus-ring);
   color: var(--cum-text);
   outline: none;
 }
@@ -280,6 +288,8 @@
   color: var(--cum-text);
   cursor: default;
   left: 0;
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
   padding: 10px;
   position: absolute;
   width: 100%;
@@ -294,14 +304,14 @@
   align-items: center;
   display: flex;
   font-size: 12px;
-  font-weight: 680;
+  font-weight: var(--cum-weight-strong);
   justify-content: space-between;
   margin-bottom: 8px;
 }
 
 #claude-usage-meter-root .cum-details-header a {
   color: var(--cum-accent);
-  font-weight: 600;
+  font-weight: var(--cum-weight-medium);
   text-decoration: none;
 }
 
@@ -314,14 +324,14 @@
   align-items: center;
   display: grid;
   gap: 9px;
-  grid-template-columns: 76px minmax(70px, 1fr) 38px 120px;
+  grid-template-columns: var(--cum-label-col) minmax(var(--cum-bar-col), 1fr) var(--cum-percent-col) var(--cum-meta-col);
   min-height: 28px;
 }
 
 #claude-usage-meter-root .cum-detail-label,
 #claude-usage-meter-root .cum-detail-percent {
   font-variant-numeric: tabular-nums;
-  font-weight: 620;
+  font-weight: var(--cum-weight-medium);
 }
 
 #claude-usage-meter-root .cum-detail-track {
@@ -334,12 +344,20 @@
 #claude-usage-meter-root .cum-detail-track > span {
   background: var(--cum-accent);
   border-radius: inherit;
+  box-shadow: var(--cum-fill-glow);
   display: block;
   height: 100%;
 }
 
-#claude-usage-meter-root .cum-detail-percent {
+#claude-usage-meter-root .cum-detail-percent,
+#claude-usage-meter-root .cum-detail-meta {
   text-align: right;
+}
+
+#claude-usage-meter-root .cum-detail-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #claude-usage-meter-root .cum-detail-meta,
@@ -365,7 +383,7 @@
 
 #claude-usage-meter-root .cum-forecast strong {
   color: var(--cum-text);
-  font-weight: 620;
+  font-weight: var(--cum-weight-medium);
   text-align: right;
 }
 
@@ -416,11 +434,11 @@
 #claude-usage-meter-root .cum-theme-picker button[aria-pressed="true"] {
   background: var(--cum-control-active);
   color: var(--cum-text);
-  font-weight: 650;
+  font-weight: var(--cum-weight-medium);
 }
 
 #claude-usage-meter-root .cum-theme-picker button:focus-visible {
-  box-shadow: inset 0 0 0 1px var(--cum-accent);
+  box-shadow: var(--cum-focus-ring);
   outline: none;
 }
 
@@ -437,12 +455,10 @@
     position: fixed;
   }
 
-  #claude-usage-meter-root .cum-main {
-    grid-template-columns: max-content minmax(108px, 1fr) max-content;
-  }
-
-  #claude-usage-meter-root[data-has-tokens="true"] .cum-main {
-    grid-template-columns: max-content minmax(108px, 1fr) max-content minmax(96px, max-content);
+  #claude-usage-meter-root {
+    --cum-usage-col: 108px;
+    --cum-reset-col: max-content;
+    --cum-tokens-col: 96px;
   }
 
   #claude-usage-meter-root .cum-section {
@@ -454,18 +470,24 @@
 
 @media (max-width: 560px) {
   #claude-usage-meter-root {
+    --cum-usage-col: 86px;
+    --cum-tokens-col: 90px;
+    --cum-label-col: 68px;
+    --cum-bar-col: 60px;
+    --cum-percent-col: 36px;
     font-size: 12px;
     grid-template-columns: minmax(0, 1fr) 30px;
     min-height: 36px;
     padding: 0 4px;
   }
 
+  /* .cum-reset is hidden below, so the meter drops to two or three tracks. */
   #claude-usage-meter-root .cum-main {
-    grid-template-columns: max-content minmax(86px, 1fr);
+    grid-template-columns: max-content minmax(var(--cum-usage-col), 1fr);
   }
 
   #claude-usage-meter-root[data-has-tokens="true"] .cum-main {
-    grid-template-columns: max-content minmax(86px, 1fr) minmax(90px, max-content);
+    grid-template-columns: max-content minmax(var(--cum-usage-col), 1fr) minmax(var(--cum-tokens-col), max-content);
   }
 
   #claude-usage-meter-root .cum-reset {
@@ -478,7 +500,7 @@
   }
 
   #claude-usage-meter-root .cum-detail-row {
-    grid-template-columns: 68px minmax(60px, 1fr) 36px;
+    grid-template-columns: var(--cum-label-col) minmax(var(--cum-bar-col), 1fr) var(--cum-percent-col);
   }
 
   #claude-usage-meter-root .cum-detail-meta {

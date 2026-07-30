@@ -511,6 +511,26 @@ test("burn forecast survives rounding jitter and follows the recent pace", () =>
   assert.equal(idled.willHitBeforeReset, false);
 });
 
+test("each detail row is coloured by its own percentage", () => {
+  const harness = createContentLifecycleHarness();
+  const now = Date.now();
+  const rows = harness.hooks.buildUsageDetails({
+    fiveHourPercent: 8,
+    fiveHourResetAt: now + 2 * 60 * 60_000,
+    sevenDayPercent: 96,
+    sevenDayResetAt: now + 3 * 24 * 60 * 60_000
+  });
+
+  assert.match(rows[0].detail, /^resets in 2h 0m$/);
+  assert.match(rows[1].detail, /^resets in 3d$/);
+
+  const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
+  const styles = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
+  assert.match(source, /data-detail-tone="\$\{getUsageTone\(/);
+  assert.match(styles, /\.cum-detail-row\[data-detail-tone="high"\]/);
+  assert.match(styles, /\.cum-detail-meta \{\n  text-align: right;/);
+});
+
 test("content shows only an explicitly marked conversation token estimate", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/content.js"), "utf8");
   const backgroundSource = fs.readFileSync(path.join(ROOT, "src/background.js"), "utf8");
