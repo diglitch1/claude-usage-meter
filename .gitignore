@@ -1,2 +1,5 @@
 .codex
 dist/
+
+# Add-on upload packages
+*.zip

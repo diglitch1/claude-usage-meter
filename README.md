@@ -1,4 +1,4 @@
-# Claude Usage Meter
+# CUM - Claude Usage Meter
 
 A lightweight Firefox extension that adds a responsive usage meter to the
 Claude.ai message composer.
