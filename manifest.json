@@ -4,8 +4,11 @@
   "version": "0.2.1",
   "description": "Shows Claude plan, 5-hour and weekly usage, reset timing, and estimated conversation tokens below the composer.",
   "icons": {
-    "48": "icons/joker-48.png",
-    "96": "icons/joker-96.png"
+    "16": "icons/cum-16.png",
+    "32": "icons/cum-32.png",
+    "48": "icons/cum-48.png",
+    "96": "icons/cum-96.png",
+    "128": "icons/cum-128.png"
   },
   "permissions": [
     "alarms",
