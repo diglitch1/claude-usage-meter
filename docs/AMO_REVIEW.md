@@ -1,4 +1,4 @@
-# AMO review notes for 0.2.0
+# AMO review notes for 0.2.1
 
 The extension's own JavaScript and CSS are shipped as readable source and have
 no project build step. The runtime ZIP contains `manifest.json`, `icons/`, and
