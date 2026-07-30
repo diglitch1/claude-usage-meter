@@ -41,6 +41,7 @@
   const USAGE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
   const COMPACT_LAYOUT_MAX_WIDTH = 820;
   const COMPACT_METER_RESERVE_PX = 48;
+  const COMPOSER_MISS_LIMIT = 3;
   const COMPOSER_SELECTOR = "textarea,[contenteditable='true']";
   const PLAN_KEY_PATTERN = /plan|subscription|billing|tier|capabilit/i;
 
@@ -94,6 +95,9 @@
   let lastRenderedHtml = "";
   let saveTimer = 0;
   let updateTimer = 0;
+  let updateRunning = false;
+  let queuedUpdateOptions = null;
+  let composerMissCount = 0;
   let domPollTimer = 0;
   let storagePullTimer = 0;
   let nextOrgScanAt = 0;
@@ -700,16 +704,55 @@
     updateTimer = window.setTimeout(() => update(options), UPDATE_DEBOUNCE_MS);
   }
 
+  // update() awaits storage, so two overlapping passes could each miss the other's
+  // freshly created bar and mount a duplicate. Serialize them and fold anything
+  // requested mid-flight into a single follow-up pass.
   async function update(options = {}) {
+    if (updateRunning) {
+      queuedUpdateOptions = {
+        forceComposerScan:
+          Boolean(queuedUpdateOptions && queuedUpdateOptions.forceComposerScan) ||
+          Boolean(options.forceComposerScan)
+      };
+      return;
+    }
+
+    updateRunning = true;
+    try {
+      await runUpdate(options);
+    } finally {
+      updateRunning = false;
+      const queued = queuedUpdateOptions;
+      queuedUpdateOptions = null;
+      if (queued) {
+        scheduleUpdate(queued);
+      }
+    }
+  }
+
+  async function runUpdate(options) {
     rollDayIfNeeded(state);
     await refreshUsageCacheFromPage();
 
-    const composer = findComposerContainer(Boolean(options.forceComposerScan));
-    if (!composer || isUsageSettingsPage()) {
+    if (isUsageSettingsPage()) {
+      composerMissCount = 0;
       removeBar();
       return;
     }
 
+    const composer = findComposerContainer(Boolean(options.forceComposerScan));
+    if (!composer) {
+      // Claude rebuilds the composer while a long prompt reflows, so it can measure
+      // as missing for a frame. Tearing the bar down on the first miss is what made
+      // it blink out mid-typing; wait for a run of misses instead.
+      composerMissCount += 1;
+      if (composerMissCount >= COMPOSER_MISS_LIMIT) {
+        removeBar();
+      }
+      return;
+    }
+
+    composerMissCount = 0;
     injectBarBesideComposer(composer, Boolean(options.forceComposerScan));
     renderBar(buildUsageState());
   }
