@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icons/cum-128.png" alt="Claude Usage Meter logo" width="128" height="128">
+</p>
+
 # CUM - Claude Usage Meter
 
 A lightweight Firefox extension that adds a responsive usage meter to the
