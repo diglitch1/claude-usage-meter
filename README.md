@@ -26,6 +26,18 @@ Click the meter to open its detailed view. The detail panel contains the weekly
 and extra-usage values, burn forecast, theme selector, and a link to Claude's
 usage settings.
 
+## Preview
+
+<p align="center">
+  <strong>Dark mode</strong><br>
+  <img src="screenshots/dark-mode.png" alt="Claude Usage Meter expanded in dark mode, showing five-hour and weekly usage, reset times, theme controls, and token estimate" width="765">
+</p>
+
+<p align="center">
+  <strong>Light mode</strong><br>
+  <img src="screenshots/light-mode.png" alt="Claude Usage Meter expanded in light mode, showing five-hour and weekly usage, reset times, theme controls, and token estimate" width="765">
+</p>
+
 ## Install
 
 ### Firefox Add-ons
