@@ -171,15 +171,22 @@ function createContentLifecycleHarness(options = {}) {
       return mountedBars.filter((element) => element.isConnected);
     }
   };
+  const resourceEntries = (options.resourceUrls || []).map((name) => ({ name }));
   const context = {
     __CUM_CONTENT_TEST__: true,
     console,
     document,
+    performance: {
+      getEntriesByType(type) {
+        return type === "resource" ? resourceEntries : [];
+      }
+    },
     window: {
       innerHeight: 800,
       innerWidth: options.viewportWidth || 1200,
       location: {
-        pathname: "/chat/11111111-1111-4111-8111-111111111111"
+        pathname: "/chat/11111111-1111-4111-8111-111111111111",
+        href: options.locationHref || "https://claude.ai/chat/11111111-1111-4111-8111-111111111111"
       }
     }
   };
@@ -198,6 +205,7 @@ function createContentLifecycleHarness(options = {}) {
       mountedBars.push(element);
       return element;
     },
+    resourceEntries,
     hooks: context.__CUM_CONTENT_TEST_HOOKS__
   };
 }
@@ -908,6 +916,23 @@ test("composer detection accepts a composer expanded by a long prompt", () => {
     top: -150,
     bottom: 750
   }), true);
+});
+
+test("meter stays hidden until an authenticated Claude session is present", () => {
+  // No org-scoped API traffic: a logged-out landing, login, or magic-link page.
+  const loggedOut = createContentLifecycleHarness();
+  assert.equal(loggedOut.hooks.isAuthenticatedApp(), false);
+
+  // The app issues /api/organizations/{id}/... calls once signed in.
+  const app = createContentLifecycleHarness({
+    resourceUrls: [`https://claude.ai/api/organizations/${ORG_A}/usage`]
+  });
+  assert.equal(app.hooks.isAuthenticatedApp(), true);
+
+  // Once confirmed, the flag latches so buffer eviction on a long-lived page
+  // cannot flip an authenticated session back to "logged out".
+  app.resourceEntries.length = 0;
+  assert.equal(app.hooks.isAuthenticatedApp(), true);
 });
 
 test("content script selects a bottom-docked meter layout for compact viewports", () => {

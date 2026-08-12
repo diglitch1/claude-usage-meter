@@ -104,6 +104,7 @@
   let lastConvTokenFetchTime = 0;
   let lastConvTokenFetchId = null;
   let compactComposer = null;
+  let pageAuthenticated = false;
   let usageRefreshPending = false;
   let detailsOpen = false;
   let themePreference = "auto";
@@ -111,6 +112,7 @@
   if (globalThis.__CUM_CONTENT_TEST__) {
     globalThis.__CUM_CONTENT_TEST_HOOKS__ = {
       isComposerLikeBox,
+      isAuthenticatedApp,
       reconcileBarElement,
       isCompactLayout,
       normalizePlanName,
@@ -463,6 +465,21 @@
     return Number.isFinite(limit) ? items.slice(0, limit) : items;
   }
 
+  // A logged-out marketing, login, or magic-link page can carry a composer-shaped
+  // box but never drives an authenticated Claude session. We confirm the session
+  // from the live page — the current URL or this load's org-scoped API traffic —
+  // rather than persisted state, so a stale org id left in storage after logout
+  // cannot keep the bar showing. Logout is a full navigation that resets the flag.
+  function isAuthenticatedApp() {
+    if (pageAuthenticated) {
+      return true;
+    }
+    if (findOrgIdInText(window.location.href) || findOrgIdInPerformance()) {
+      pageAuthenticated = true;
+    }
+    return pageAuthenticated;
+  }
+
   function detectOrganizationId(deep = false) {
     const fromPage = findOrgIdInText(window.location.href) || findOrgIdInPerformance();
     if (fromPage || !deep) {
@@ -655,6 +672,15 @@
     await refreshUsageCacheFromPage();
 
     if (isUsageSettingsPage()) {
+      composerMissCount = 0;
+      removeBar();
+      return;
+    }
+
+    // The composer shape alone also matches the logged-out landing, login, and
+    // magic-link pages, which is why a stale bar leaked onto them. Only mount
+    // inside an authenticated session.
+    if (!isAuthenticatedApp()) {
       composerMissCount = 0;
       removeBar();
       return;
