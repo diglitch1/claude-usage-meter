@@ -133,7 +133,7 @@
   async function init() {
     state = await loadState();
     scheduleStoragePull();
-    rescanPage(true);
+    detectAndPersistOrgId(true);
     requestBackgroundUsageRefresh("content-open", true);
     installDomPoller();
     installRouteAndViewportListeners();
@@ -396,10 +396,6 @@
     });
   }
 
-  function rescanPage(force = false) {
-    detectAndPersistOrgId(force);
-  }
-
   function detectAndPersistOrgId(force = false) {
     const now = Date.now();
     if (!force && now < nextOrgScanAt) {
@@ -633,7 +629,7 @@
 
   function handlePageActivated() {
     scheduleUpdate({ forceComposerScan: true });
-    rescanPage(true);
+    detectAndPersistOrgId(true);
   }
 
   function scheduleUpdate(options = {}) {
