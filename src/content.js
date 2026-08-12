@@ -35,7 +35,6 @@
   const UPDATE_DEBOUNCE_MS = 350;
   const DOM_POLL_MS = 3000;
   const ORG_SCAN_INTERVAL_MS = 3000;
-  const PLAN_SCAN_INTERVAL_MS = 30000;
   const BACKGROUND_REFRESH_MIN_MS = 30000;
   const CONV_FETCH_INTERVAL_MS = 15000;
   const STORAGE_PULL_MS = 90000;
@@ -44,7 +43,6 @@
   const COMPACT_METER_RESERVE_PX = 48;
   const COMPOSER_MISS_LIMIT = 3;
   const COMPOSER_SELECTOR = "textarea,[contenteditable='true']";
-  const PLAN_KEY_PATTERN = /plan|subscription|billing|tier|capabilit/i;
 
   const ICONS = {
     clock:
@@ -102,12 +100,10 @@
   let domPollTimer = 0;
   let storagePullTimer = 0;
   let nextOrgScanAt = 0;
-  let nextPlanScanAt = 0;
   let lastBackgroundRefreshRequestAt = 0;
   let lastConvTokenFetchTime = 0;
   let lastConvTokenFetchId = null;
   let compactComposer = null;
-  let didScanInlinePlan = false;
   let usageRefreshPending = false;
   let detailsOpen = false;
   let themePreference = "auto";
@@ -119,8 +115,6 @@
       isCompactLayout,
       normalizePlanName,
       strongestPlanName,
-      pickPlan,
-      findPlanInValue,
       selectConversationTokenState,
       formatEstimatedTokenCount,
       formatLastUpdatedAt,
@@ -402,7 +396,6 @@
 
   function rescanPage(force = false) {
     detectAndPersistOrgId(force);
-    detectAndPersistPlan(force);
   }
 
   function detectAndPersistOrgId(force = false) {
@@ -439,80 +432,6 @@
       });
 
     return true;
-  }
-
-  function detectAndPersistPlan(force = false) {
-    const now = Date.now();
-    const currentPlan = normalizePlanName(state.usage && state.usage.plan);
-    if ((currentPlan && !force) || (!force && now < nextPlanScanAt)) {
-      return currentPlan;
-    }
-
-    nextPlanScanAt = now + PLAN_SCAN_INTERVAL_MS;
-    const plan = normalizePlanName(
-      detectPlanFromSettingsPage() ||
-      findPlanInWebStorage(getWebStorage("localStorage")) ||
-      findPlanInWebStorage(getWebStorage("sessionStorage")) ||
-      findPlanInInlineState()
-    );
-    if (!plan || plan === currentPlan) {
-      return plan;
-    }
-
-    state.usage = Object.assign({}, state.usage, { plan });
-    storeUsageForOrg(state, state.organizationId, state.usage);
-    scheduleSave();
-    scheduleUpdate({});
-    return plan;
-  }
-
-  function detectPlanFromSettingsPage() {
-    if (!/^\/settings(?:\/|$)/i.test(window.location.pathname) || !document.body) {
-      return "";
-    }
-    return pickPlan(normalizeLines(document.body.innerText || ""));
-  }
-
-  function findPlanInWebStorage(storage) {
-    return eachStorageEntry(storage, (key, raw) => {
-      if (!PLAN_KEY_PATTERN.test(raw)) {
-        return "";
-      }
-
-      try {
-        return findPlanInValue(JSON.parse(raw));
-      } catch (_error) {
-        return PLAN_KEY_PATTERN.test(String(key || "")) ? normalizePlanName(raw) : "";
-      }
-    });
-  }
-
-  function findPlanInValue(value) {
-    return findInValue(
-      value,
-      (text, path) =>
-        path.some((key) => PLAN_KEY_PATTERN.test(String(key || "")))
-          ? normalizePlanName(text)
-          : "",
-      { maxDepth: 7 }
-    );
-  }
-
-  function findPlanInInlineState() {
-    if (didScanInlinePlan) {
-      return "";
-    }
-    didScanInlinePlan = true;
-
-    const pattern = /(?:plan_type|planType|subscription_type|subscriptionType|rate_limit_tier|rateLimitTier|billing_plan|billingPlan)["']?\s*[:=]\s*["']([^"']+)["']/i;
-    return findFirst(Array.from(document.querySelectorAll("script")).slice(0, 40), (script) => {
-      const text = script.textContent || "";
-      if (!/plan|subscription|billing|tier/i.test(text)) {
-        return "";
-      }
-      const match = text.match(pattern);
-      return normalizePlanName(match && match[1]);
-    });
   }
 
   // Walks nested storage/state values, remembering the key path so a match can
@@ -670,7 +589,6 @@
       }
 
       const orgId = detectAndPersistOrgId();
-      detectAndPersistPlan();
       if (orgId && orgId !== previousOrgId) {
         requestBackgroundUsageRefresh("org-detected", true, orgId);
       }
@@ -1044,7 +962,6 @@
     const resetDelta = Math.abs((extracted.resetAt || 0) - (state.usage.resetAt || 0));
     const usageChanged =
       extracted.windowLabel !== state.usage.windowLabel ||
-      extracted.plan !== state.usage.plan ||
       extracted.usagePercent !== state.usage.usagePercent ||
       extracted.resetText !== state.usage.resetText ||
       resetDelta > 60000;
@@ -1080,7 +997,6 @@
     const rawReset = pickResetText(currentBlock);
     return {
       windowLabel: "5h",
-      plan: pickPlan(text),
       usagePercent,
       resetText: normalizeResetText(rawReset),
       resetAt: parseResetAt(rawReset)
@@ -1467,18 +1383,6 @@
     const rest = text.slice(start);
     const end = rest.slice(1).search(endRe);
     return end >= 0 ? rest.slice(0, end + 1) : rest;
-  }
-
-  function pickPlan(text) {
-    const patterns = [
-      /Plan usage limits\s+([^\n]+)/i,
-      /(?:Current|Subscription) plan\s*:?\s*([^\n]+)/i
-    ];
-
-    return findFirst(patterns, (pattern) => {
-      const match = String(text || "").match(pattern);
-      return normalizePlanName(match && match[1]);
-    });
   }
 
   function pickPercent(text) {
