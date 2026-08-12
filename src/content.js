@@ -17,7 +17,8 @@
     getUsageForOrg,
     normalizeOrgId,
     normalizePlanName,
-    storeUsageForOrg
+    storeUsageForOrg,
+    strongestPlanName
   } = shared;
 
   const ROOT_ID = "claude-usage-meter-root";
@@ -117,6 +118,7 @@
       reconcileBarElement,
       isCompactLayout,
       normalizePlanName,
+      strongestPlanName,
       pickPlan,
       findPlanInValue,
       selectConversationTokenState,

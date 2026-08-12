@@ -411,6 +411,90 @@ test("background falls back to Claude organization metadata for the plan", async
   assert.equal(harness.getState().usage.plan, "Max 5x");
 });
 
+test("background resolves the plan from the strongest capability, not the first", async () => {
+  // A Max org's rate_limit_tier carries no "max" token and its capabilities
+  // list "claude_pro" before "claude_max" (entitlements are a superset), so a
+  // first-match scan mislabeled Max accounts as Pro. Shape mirrors a real
+  // /api/organizations record.
+  const harness = createBackgroundHarness(async (url) => {
+    if (url.endsWith("/api/organizations")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [{
+            uuid: ORG_A,
+            name: "someone's Organization",
+            rate_limit_tier: "default_claude_ai",
+            billing_type: "stripe_subscription",
+            capabilities: ["chat", "claude_pro", "claude_max"]
+          }];
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return makeUsageResponse({
+          utilization: 34,
+          resetsAt: "2026-05-14T18:30:01.095671+00:00"
+        });
+      }
+    };
+  });
+
+  await harness.send({ type: "CUM_REFRESH_USAGE", force: true, orgId: ORG_A });
+  assert.equal(harness.getState().usage.plan, "Max");
+});
+
+test("background keeps a Pro org labeled Pro from its capabilities", async () => {
+  // Real Pro payload: no "max" anywhere, plan lives only in capabilities.
+  const harness = createBackgroundHarness(async (url) => {
+    if (url.endsWith("/api/organizations")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [{
+            uuid: ORG_A,
+            name: "someone's Organization",
+            rate_limit_tier: "default_claude_ai",
+            billing_type: "stripe_subscription",
+            capabilities: ["chat", "claude_pro"]
+          }];
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return makeUsageResponse({
+          utilization: 34,
+          resetsAt: "2026-05-14T18:30:01.095671+00:00"
+        });
+      }
+    };
+  });
+
+  await harness.send({ type: "CUM_REFRESH_USAGE", force: true, orgId: ORG_A });
+  assert.equal(harness.getState().usage.plan, "Pro");
+});
+
+test("strongestPlanName ranks paid tiers above the plans they include", () => {
+  const harness = createContentLifecycleHarness();
+  const strongest = harness.hooks.strongestPlanName;
+
+  assert.equal(strongest(["chat", "claude_pro", "claude_max"]), "Max");
+  assert.equal(strongest(["default_claude_max_5x", "claude_pro", "claude_max"]), "Max 5x");
+  assert.equal(strongest(["chat", "claude_pro"]), "Pro");
+  assert.equal(strongest(["chat"]), "");
+  assert.equal(strongest(["claude_pro", "team_premium"]), "Team");
+});
+
 test("background clears old active usage when a 200 response cannot be parsed", async () => {
   let response = makeUsageResponse({
     utilization: 45,

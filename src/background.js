@@ -18,7 +18,8 @@
     normalizeConversationId,
     normalizeOrgId,
     normalizePlanName,
-    storeUsageForOrg
+    storeUsageForOrg,
+    strongestPlanName
   } = shared;
 
   const STORAGE_KEY = "claudeUsageMeterStateV2";
@@ -753,7 +754,11 @@
       return "";
     }
 
-    return firstPlanName([
+    // Strongest-wins, not first-wins: a plan's entitlements are a superset of
+    // weaker ones (a Max org lists both "claude_pro" and "claude_max"), so
+    // taking the first match here mislabeled Max accounts as Pro. Safe on this
+    // record because every candidate describes the user's own org.
+    const plan = strongestPlanName([
       record.plan,
       record.plan_type,
       record.subscription_type,
@@ -765,6 +770,20 @@
       record.subscription && record.subscription.type,
       ...(Array.isArray(record.capabilities) ? record.capabilities : [])
     ]);
+
+    // Temporary: surfaces the raw signals so a tester on any plan can confirm
+    // what their org actually reports if detection still looks wrong.
+    try {
+      console.debug("[usage-meter] plan detection", {
+        detected: plan,
+        rate_limit_tier: record.rate_limit_tier,
+        capabilities: record.capabilities
+      });
+    } catch (_error) {
+      /* console may be unavailable in some contexts */
+    }
+
+    return plan;
   }
 
   function storageGet(keys) {

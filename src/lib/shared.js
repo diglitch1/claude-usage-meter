@@ -50,6 +50,43 @@
     return findFirst(candidates, normalizePlanName);
   }
 
+  // Higher rank wins when a single record carries several plan signals. This
+  // matters because a plan's capabilities are a superset of weaker ones: a Max
+  // org reports both "claude_pro" and "claude_max", so first-match-wins would
+  // mislabel it as Pro. Only use this on an authoritative record (e.g. the
+  // /api/organizations entry for the user's own org), never on scraped page
+  // text where an upsell table lists every plan.
+  const PLAN_PRIORITY = {
+    Free: 1,
+    Pro: 2,
+    Education: 3,
+    Team: 4,
+    Max: 5,
+    Enterprise: 6
+  };
+
+  function planRank(name) {
+    if (!name) {
+      return 0;
+    }
+    const base = name.indexOf("Max") === 0 ? "Max" : name;
+    return PLAN_PRIORITY[base] || 0;
+  }
+
+  function strongestPlanName(candidates) {
+    let best = "";
+    let bestRank = 0;
+    for (const candidate of candidates) {
+      const name = normalizePlanName(candidate);
+      const rank = planRank(name);
+      if (rank > bestRank) {
+        bestRank = rank;
+        best = name;
+      }
+    }
+    return best;
+  }
+
   function matchFirstPattern(value, patterns) {
     const text = String(value || "").trim();
     return findFirst(patterns, (pattern) => {
@@ -175,6 +212,7 @@
     normalizeConversationId,
     normalizeOrgId,
     normalizePlanName,
-    storeUsageForOrg
+    storeUsageForOrg,
+    strongestPlanName
   };
 })();
