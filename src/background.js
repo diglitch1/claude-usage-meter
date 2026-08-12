@@ -305,6 +305,19 @@
     if (isDifferentOrg) {
       state.usage.usagePercent = null;
     }
+
+    // The plan comes from the org listing, not the usage endpoint, so resolve it
+    // even when usage sync fails. Otherwise a failed /usage call leaves the bar
+    // reading "Plan unavailable" for an account whose plan we can plainly see.
+    if (details.orgId) {
+      const plan =
+        (isDifferentOrg ? "" : normalizePlanName(previousUsage.plan)) ||
+        await fetchOrganizationPlan(details.orgId);
+      if (plan) {
+        state.usage.plan = plan;
+      }
+    }
+
     if (details.orgId) {
       storeUsageForOrg(state, details.orgId, state.usage);
     }
@@ -754,11 +767,13 @@
       return "";
     }
 
+    const capabilities = Array.isArray(record.capabilities) ? record.capabilities : [];
+
     // Strongest-wins, not first-wins: a plan's entitlements are a superset of
     // weaker ones (a Max org lists both "claude_pro" and "claude_max"), so
     // taking the first match here mislabeled Max accounts as Pro. Safe on this
     // record because every candidate describes the user's own org.
-    const plan = strongestPlanName([
+    let plan = strongestPlanName([
       record.plan,
       record.plan_type,
       record.subscription_type,
@@ -768,11 +783,18 @@
       record.account_type,
       record.subscription && record.subscription.plan,
       record.subscription && record.subscription.type,
-      ...(Array.isArray(record.capabilities) ? record.capabilities : [])
+      ...capabilities
     ]);
 
-    // Temporary: surfaces the raw signals so a tester on any plan can confirm
-    // what their org actually reports if detection still looks wrong.
+    // A Claude.ai chat org that names no paid tier is the Free plan. The "chat"
+    // capability is what distinguishes it from an API-only org, which carries no
+    // consumer plan and should stay blank.
+    if (!plan && capabilities.indexOf("chat") !== -1) {
+      plan = "Free";
+    }
+
+    // Temporary: lets a tester on any plan confirm what their org actually
+    // reports if a label still looks wrong. Remove before publishing.
     try {
       console.debug("[usage-meter] plan detection", {
         detected: plan,

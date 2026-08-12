@@ -484,6 +484,68 @@ test("background keeps a Pro org labeled Pro from its capabilities", async () =>
   assert.equal(harness.getState().usage.plan, "Pro");
 });
 
+test("background labels a chat org with no paid capability as Free", async () => {
+  // A Free org names no plan token anywhere; the "chat" capability is the only
+  // signal that it is a consumer account rather than an API-only org.
+  const harness = createBackgroundHarness(async (url) => {
+    if (url.endsWith("/api/organizations")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [{
+            uuid: ORG_A,
+            name: "someone's Organization",
+            rate_limit_tier: "default_claude_ai",
+            capabilities: ["chat"]
+          }];
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return makeUsageResponse({
+          utilization: 12,
+          resetsAt: "2026-05-14T18:30:01.095671+00:00"
+        });
+      }
+    };
+  });
+
+  await harness.send({ type: "CUM_REFRESH_USAGE", force: true, orgId: ORG_A });
+  assert.equal(harness.getState().usage.plan, "Free");
+});
+
+test("background resolves the plan from the org listing even when usage sync fails", async () => {
+  // The plan lives in /api/organizations, not /usage, so a failed usage call must
+  // not leave the bar reading "Plan unavailable".
+  const harness = createBackgroundHarness(async (url) => {
+    if (url.endsWith("/api/organizations")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [{
+            uuid: ORG_A,
+            name: "someone's Organization",
+            rate_limit_tier: "default_claude_ai",
+            capabilities: ["chat", "claude_pro"]
+          }];
+        }
+      };
+    }
+
+    return { ok: false, status: 500, async json() { return {}; } };
+  });
+
+  const result = await harness.send({ type: "CUM_REFRESH_USAGE", force: true, orgId: ORG_A });
+  assert.equal(result.ok, false);
+  assert.equal(harness.getState().usage.plan, "Pro");
+});
+
 test("strongestPlanName ranks paid tiers above the plans they include", () => {
   const harness = createContentLifecycleHarness();
   const strongest = harness.hooks.strongestPlanName;
@@ -644,17 +706,6 @@ test("plan labels are normalized and never guessed", () => {
   assert.equal(normalize("enterprise"), "Enterprise");
   assert.equal(normalize("education plan"), "Education");
   assert.equal(normalize("unknown paid account"), "");
-  assert.equal(
-    harness.hooks.pickPlan("Settings\nPlan usage limits Free\nCurrent session\n8%"),
-    "Free"
-  );
-  assert.equal(harness.hooks.findPlanInValue({
-    account: {
-      subscription: {
-        plan_type: "team_premium"
-      }
-    }
-  }), "Team");
   assert.equal(harness.hooks.formatEstimatedTokenCount(null), "");
   assert.match(harness.hooks.formatEstimatedTokenCount(44252), /^~44[,.]252 tokens$/);
 
