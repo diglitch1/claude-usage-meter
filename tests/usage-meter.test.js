@@ -457,6 +457,43 @@ test("background resolves the plan from the strongest capability, not the first"
   assert.equal(harness.getState().usage.plan, "Max");
 });
 
+test("background lets the org capabilities override a weaker plan in the usage response", async () => {
+  // The real Max bug: the /usage payload reports the base entitlement
+  // ("claude_pro"), which used to win because it was read before the
+  // authoritative org record. The org capabilities must override it.
+  const harness = createBackgroundHarness(async (url) => {
+    if (url.endsWith("/api/organizations")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [{
+            uuid: ORG_A,
+            name: "someone's Organization",
+            rate_limit_tier: "default_claude_ai",
+            capabilities: ["chat", "claude_pro", "claude_max"]
+          }];
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return makeUsageResponse({
+          utilization: 34,
+          resetsAt: "2026-05-14T18:30:01.095671+00:00",
+          planType: "claude_pro"
+        });
+      }
+    };
+  });
+
+  await harness.send({ type: "CUM_REFRESH_USAGE", force: true, orgId: ORG_A });
+  assert.equal(harness.getState().usage.plan, "Max");
+});
+
 test("background keeps a Pro org labeled Pro from its capabilities", async () => {
   // Real Pro payload: no "max" anywhere, plan lives only in capabilities.
   const harness = createBackgroundHarness(async (url) => {

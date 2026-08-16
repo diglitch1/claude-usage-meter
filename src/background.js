@@ -193,10 +193,14 @@
 
       const data = await res.json();
       const previousUsage = getUsageForOrg(state, orgId) || state.usage || {};
+      // Ask the authoritative source (org capabilities, strongest-wins) first.
+      // The /usage response only reports the base entitlement, so trusting it
+      // ahead of this mislabeled Max accounts as Pro. Cache comes last so a
+      // stale wrong label can't outrank a fresh authoritative read.
       const detectedPlan =
+        (await fetchOrganizationPlan(orgId)) ||
         extractPlanFromUsageResponse(data) ||
-        normalizePlanName(previousUsage.plan) ||
-        await fetchOrganizationPlan(orgId);
+        normalizePlanName(previousUsage.plan);
       return markUsageSuccess({
         data,
         detectedPlan,
