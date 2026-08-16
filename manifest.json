@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Claude Usage Meter",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Shows Claude plan, 5-hour and weekly usage, reset timing, and estimated conversation tokens below the composer.",
   "icons": {
     "16": "icons/cum-16.png",
