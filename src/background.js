@@ -801,18 +801,6 @@
       plan = "Free";
     }
 
-    // Temporary: lets a tester on any plan confirm what their org actually
-    // reports if a label still looks wrong. Remove before publishing.
-    try {
-      console.debug("[usage-meter] plan detection", {
-        detected: plan,
-        rate_limit_tier: record.rate_limit_tier,
-        capabilities: record.capabilities
-      });
-    } catch (_error) {
-      /* console may be unavailable in some contexts */
-    }
-
     return plan;
   }
 
