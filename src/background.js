@@ -262,7 +262,11 @@
       });
       await storageSet({ [USAGE_HISTORY_KEY]: historyByOrg });
     } else {
+      // The response carried no usage windows (e.g. a Free org), but the plan
+      // still resolved from the org listing. Keep it so the bar names the plan
+      // instead of reading "Plan unavailable".
       state.usage = Object.assign(createStaleUsageForOrg(orgId, now), {
+        plan: normalizePlanName(detectedPlan) || normalizePlanName((state.usage || {}).plan),
         lastError: "unparsed-usage-response",
         lastErrorAt: now,
         source: "usage-api",

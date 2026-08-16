@@ -564,6 +564,39 @@ test("background labels a chat org with no paid capability as Free", async () =>
   assert.equal(harness.getState().usage.plan, "Free");
 });
 
+test("background keeps the plan when the usage response has no parseable windows", async () => {
+  // A Free org's /usage can return 200 with no usage windows. That response
+  // does not parse, but the plan still resolved from the org listing and must
+  // survive instead of leaving the bar reading "Plan unavailable".
+  const harness = createBackgroundHarness(async (url) => {
+    if (url.endsWith("/api/organizations")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [{
+            uuid: ORG_A,
+            name: "someone's Organization",
+            rate_limit_tier: "default_claude_ai",
+            capabilities: ["chat"]
+          }];
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { five_hour: null, seven_day: null, extra_usage: null };
+      }
+    };
+  });
+
+  await harness.send({ type: "CUM_REFRESH_USAGE", force: true, orgId: ORG_A });
+  assert.equal(harness.getState().usage.plan, "Free");
+});
+
 test("background resolves the plan from the org listing even when usage sync fails", async () => {
   // The plan lives in /api/organizations, not /usage, so a failed usage call must
   // not leave the bar reading "Plan unavailable".
